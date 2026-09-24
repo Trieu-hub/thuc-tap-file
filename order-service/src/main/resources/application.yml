@@ -11,6 +11,15 @@ spring:
     open-in-view: false
     hibernate:
       ddl-auto: validate   # Flyway owns the schema (CLAUDE.md 2.3)
+  jackson:
+    property-naming-strategy: SNAKE_CASE   # REST body and contracts/schemas use snake_case
+  rabbitmq:
+    host: localhost
+    username: sandbox
+    password: sandbox_demo_pwd
+    template:
+      # convertSendAndReceive returns null after this, it does not throw (D7). Default is 5000.
+      reply-timeout: 3000
 
 server:
   port: 8080

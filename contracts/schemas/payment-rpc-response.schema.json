@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sandbox.local/contracts/payment-rpc-response.schema.json",
+  "title": "PaymentRpcResponse",
+  "description": "Reply sent by payment-service to the request's reply_to, with the request's AMQP correlation_id. Mirrors RecordPaymentResponse in payment.proto.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["order_id", "status", "duplicate"],
+  "properties": {
+    "order_id": { "type": "string" },
+    "status": { "type": "string", "enum": ["RECORDED", "REJECTED"] },
+    "payment_id": { "type": ["string", "null"], "description": "null when REJECTED", "examples": ["PAY-3f0c9d4e-..."] },
+    "reject_reason": { "type": ["string", "null"], "description": "Set only when REJECTED", "enum": ["INVALID_AMOUNT", "IDEMPOTENCY_KEY_MISMATCH", null] },
+    "duplicate": { "type": "boolean", "description": "true when partner_transaction_id was already recorded: the stored payment is returned, nothing is charged again (D4)" },
+    "recorded_at": { "type": ["string", "null"], "format": "date-time" }
+  },
+  "if": { "properties": { "status": { "const": "RECORDED" } } },
+  "then": { "required": ["payment_id", "recorded_at"], "properties": { "payment_id": { "type": "string" } } },
+  "else": { "required": ["reject_reason"], "properties": { "reject_reason": { "type": "string" } } }
+}

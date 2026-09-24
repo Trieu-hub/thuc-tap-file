@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sandbox.local/contracts/policy-rpc-response.schema.json",
+  "title": "PolicyRpcResponse",
+  "description": "Reply sent by policy-service to the request's reply_to. Issuance is idempotent on order_id: a replayed request returns the stored policy with duplicate = true.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["order_id", "status", "policy_id", "policy_number", "duplicate", "issued_at"],
+  "properties": {
+    "order_id": { "type": "string" },
+    "status": { "type": "string", "enum": ["ISSUED"] },
+    "policy_id": { "type": "string" },
+    "policy_number": { "type": "string", "pattern": "^ACBI-\\d{4}-\\d+$", "examples": ["ACBI-2026-048213"] },
+    "duplicate": { "type": "boolean", "description": "true when the order already had a policy" },
+    "issued_at": { "type": "string", "format": "date-time" }
+  }
+}
