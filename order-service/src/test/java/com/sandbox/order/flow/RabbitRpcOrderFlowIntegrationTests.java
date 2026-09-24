@@ -38,6 +38,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.messaging.Message;
 import org.springframework.messaging.handler.annotation.Header;
 import org.springframework.messaging.support.MessageBuilder;
+import org.springframework.test.annotation.DirtiesContext;
 
 import com.sandbox.order.rpc.OrderRpcClient;
 import com.sandbox.order.support.Concurrently;
@@ -56,6 +57,8 @@ import static org.awaitility.Awaitility.await;
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @Testcontainers(disabledWithoutDocker = true)
 @ExtendWith(OutputCaptureExtension.class)
+// Close the context with the class: its listeners would otherwise keep reconnecting to the stopped container.
+@DirtiesContext
 class RabbitRpcOrderFlowIntegrationTests {
 
 	@Container

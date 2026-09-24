@@ -26,6 +26,7 @@ import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 
 import com.sandbox.payment.payment.PaymentRecorder;
@@ -44,6 +45,8 @@ import static org.mockito.Mockito.verify;
 @SpringBootTest
 @Testcontainers(disabledWithoutDocker = true)
 @ExtendWith(OutputCaptureExtension.class)
+// Close the context with the class: its listeners would otherwise keep reconnecting to the stopped container.
+@DirtiesContext
 class PaymentRpcListenerIntegrationTests {
 
 	@Container
