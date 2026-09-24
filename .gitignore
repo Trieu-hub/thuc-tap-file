@@ -1,0 +1,12 @@
+target/
+*.class
+*.log
+.idea/
+*.iml
+.vscode/
+.DS_Store
+.env.local
+docs/
+current-state.md
+CLAUDE.md
+EOF

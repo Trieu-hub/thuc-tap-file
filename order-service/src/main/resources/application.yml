@@ -1,0 +1,27 @@
+# Defaults target a local run against `docker compose` infrastructure (MySQL on host port 3307).
+# Inside Docker, docker-compose.yml overrides them with SPRING_* environment variables.
+spring:
+  application:
+    name: order-service
+  datasource:
+    url: jdbc:mysql://localhost:3307/order_db
+    username: order_svc
+    password: order_demo_pwd
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate   # Flyway owns the schema (CLAUDE.md 2.3)
+
+server:
+  port: 8080
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
+logging:
+  structured:
+    format:
+      console: com.sandbox.order.observability.SandboxJsonLogFormatter

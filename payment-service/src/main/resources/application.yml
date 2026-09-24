@@ -1,0 +1,28 @@
+# Defaults target a local run against `docker compose` infrastructure (MySQL on host port 3307).
+# Inside Docker, docker-compose.yml overrides them with SPRING_* environment variables.
+spring:
+  application:
+    name: payment-service
+  datasource:
+    url: jdbc:mysql://localhost:3307/payment_db
+    username: payment_svc
+    password: payment_demo_pwd
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate   # Flyway owns the schema (CLAUDE.md 2.3)
+
+server:
+  port: 8081
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
+logging:
+  structured:
+    format:
+      console: com.sandbox.payment.observability.SandboxJsonLogFormatter
+# gRPC server (port 9090) is added on Day 3 with spring-boot-starter-grpc-server (CLAUDE.md D16).
