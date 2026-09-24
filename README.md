@@ -18,7 +18,15 @@ Kèm theo: Redis (idempotency và cache), log JSON có `correlation_id` xuyên s
 
 ## Trạng thái
 
-**Ngày 1 đã xong:** hạ tầng và khung 3 service chạy được bằng một lệnh, mọi container `healthy`. **Chưa có logic nghiệp vụ.** Chi tiết tiến độ xem [`current-state.md`](current-state.md).
+- **Ngày 1 đã xong:** hạ tầng và khung 3 service chạy được bằng một lệnh, mọi container `healthy`.
+- **Ngày 2 đã xong: Luồng 1 (`RABBITMQ_RPC`) chạy thông qua 3 service:**
+  - RPC qua `payment.rpc.request` và `policy.rpc.request`, dùng Direct Reply-to.
+  - Timeout 3 giây: trả `PROCESSING_FAILED`, HTTP không treo.
+  - Queue có TTL 3 giây, message hết hạn hoặc bị lỗi sẽ vào DLQ.
+  - `correlation_id` được truyền qua header `x-correlation-id` và có trong log của cả 3 service.
+- **Chưa làm:** Luồng 2 (`GRPC_KAFKA` hiện trả `501`), Redis (idempotency và cache), Web UI.
+
+Chi tiết tiến độ xem [`current-state.md`](current-state.md).
 
 ---
 
@@ -59,13 +67,35 @@ mvn -B -pl order-service -am test -Dtest=SandboxJsonLogFormatterTests -Dsurefire
 
 ## API (Order Service)
 
-> ⏳ **Chưa cài đặt.** Làm từ Ngày 2. Bảng dưới là hợp đồng đã chốt.
-
-| Method | Path | Mô tả |
+| Method | Path | Kết quả |
 |---|---|---|
-| `POST` | `/api/v1/orders` | Tạo đơn (`partner_order_id`, `customer_name`, `phone`, `amount`, `mode`) |
-| `GET` | `/api/v1/orders/{id}` | Chi tiết đơn + timeline + `correlation_id` + `cache_status` |
-| `GET` | `/api/v1/orders` | Danh sách đơn |
+| `POST` | `/api/v1/orders` | Tạo đơn và chạy Luồng 1. Xem bảng mã trả về bên dưới |
+| `GET` | `/api/v1/orders/{id}` | Chi tiết đơn và timeline, đọc thẳng DB; `404` nếu không có. `cache_status` có từ Ngày 4 (Redis) |
+| `GET` | `/api/v1/orders` | 100 đơn mới nhất, mới nhất trước (không kèm timeline) |
+
+Body của `POST` (JSON dùng snake_case, `amount` là số nguyên VND):
+
+```json
+{"partner_order_id": "P-1001", "customer_name": "Nguyen Van A", "phone": "0901234567", "amount": 500000, "mode": "RABBITMQ_RPC"}
+```
+
+| Mã | Khi nào |
+|---|---|
+| `200` | Luồng 1 chạy xong: `status` là `ISSUED` (có `policy_number`) hoặc `PROCESSING_FAILED` (có `failure_reason`: `PAYMENT_TIMEOUT`, `POLICY_TIMEOUT`, lý do từ Payment như `INVALID_AMOUNT`, hoặc `BROKER_UNAVAILABLE`). Chờ tối đa khoảng 6 giây (2 × 3 giây) |
+| `200` + `idempotent_replay: true` | `partner_order_id` đã tồn tại: trả nguyên đơn cũ, không gọi RPC lần nữa |
+| `400` | Body sai; `errors[]` liệt kê field lỗi (tên snake_case), kể cả `mode` không hợp lệ |
+| `409` | Hai request trùng đến cùng lúc; request thua trả 409, gửi lại sau |
+| `501` | `mode = GRPC_KAFKA` (Luồng 2, làm ở Ngày 3) |
+
+Response gồm `order_id` (dạng `ORD-yyyyMMdd-XXXXXXXX`), `status`, `correlation_id` (UUID), `policy_number`, `failure_reason` và `timeline[]`. Mỗi bước timeline có `step`, `service`, `transport`, `status`, `duration_ms`, `detail`. Các bước: `ORDER_CREATED` → `PAYMENT` → `POLICY_ISSUANCE` → `NOTIFICATION`, hoặc `PROCESSING_FAILED`.
+
+Thử nhanh (PowerShell):
+
+```powershell
+Invoke-RestMethod -Method Post -Uri http://localhost:8080/api/v1/orders -ContentType 'application/json' -Body '{"partner_order_id":"P-1001","customer_name":"Nguyen Van A","phone":"0901234567","amount":500000,"mode":"RABBITMQ_RPC"}'
+```
+
+Muốn thấy timeout: chạy `docker compose stop payment-service` rồi gửi đơn mới. Sau khoảng 3 giây sẽ nhận `PROCESSING_FAILED`, và request hết hạn nằm trong `payment.rpc.request.dlq` trên RabbitMQ UI (`:15672`).
 
 ---
 
