@@ -11,6 +11,16 @@ spring:
     open-in-view: false
     hibernate:
       ddl-auto: validate   # Flyway owns the schema (CLAUDE.md 2.3)
+  jackson:
+    property-naming-strategy: SNAKE_CASE   # contracts/schemas use snake_case; the AMQP converter reuses this mapper
+  rabbitmq:
+    host: localhost
+    username: sandbox
+    password: sandbox_demo_pwd
+    listener:
+      simple:
+        # A message that throws goes to the DLQ once instead of being redelivered forever (F8).
+        default-requeue-rejected: false
 
 server:
   port: 8082

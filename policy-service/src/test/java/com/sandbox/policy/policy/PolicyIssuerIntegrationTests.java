@@ -28,8 +28,9 @@ import static org.assertj.core.api.Assertions.assertThatIllegalStateException;
 /**
  * Runs against a real MySQL 8.4 (Testcontainers) because the guarantees under test are InnoDB's:
  * unique-index locking between concurrent transactions. Skipped when Docker is not available.
+ * The RabbitMQ listener is not started: these tests call the issuer directly and need no broker.
  */
-@SpringBootTest
+@SpringBootTest(properties = "spring.rabbitmq.listener.simple.auto-startup=false")
 @Testcontainers(disabledWithoutDocker = true)
 class PolicyIssuerIntegrationTests {
 
