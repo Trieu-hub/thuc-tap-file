@@ -70,6 +70,13 @@ public class OrderProgressService {
 		return transition(orderId, OrderStatus.PROCESSING_FAILED, entry, null, failureReason);
 	}
 
+	/** Adds a step that does not change the status, e.g. the simulated notification (D5). */
+	@Transactional
+	public void recordStep(String orderId, TimelineEntry entry) {
+		lockOrder(orderId);
+		appendStepOnce(orderId, entry);
+	}
+
 	private TransitionResult transition(String orderId, OrderStatus target, TimelineEntry entry, String policyNumber,
 			String failureReason) {
 		OrderStatus current = lockOrder(orderId);
