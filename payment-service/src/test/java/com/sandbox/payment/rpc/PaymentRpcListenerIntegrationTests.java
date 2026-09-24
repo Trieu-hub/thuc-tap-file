@@ -34,6 +34,7 @@ import com.sandbox.payment.payment.PaymentRecorder;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -71,6 +72,9 @@ class PaymentRpcListenerIntegrationTests {
 
 	@Autowired
 	private JdbcTemplate jdbc;
+
+	@Autowired
+	private RpcWarmUp warmUp;
 
 	@MockitoSpyBean
 	private PaymentRecorder recorder;
@@ -162,6 +166,18 @@ class PaymentRpcListenerIntegrationTests {
 		assertThat(dead).isNotNull();
 		assertThat(new String(dead.getBody(), StandardCharsets.UTF_8)).isEqualTo("{not json");
 		verify(this.recorder, times(0)).record(any());
+	}
+
+	@Test
+	void warmUpRunsTheRecorderAndPersistsNothing(CapturedOutput output) {
+		// The context already warmed up once at startup; count only this call.
+		clearInvocations(this.recorder);
+
+		this.warmUp.warmUp();
+
+		verify(this.recorder, times(1)).record(any());
+		assertThat(this.jdbc.queryForObject("SELECT COUNT(*) FROM payments", Integer.class)).isZero();
+		assertThat(output).contains("\"action\":\"warm_up\"", "\"status\":\"SUCCESS\"");
 	}
 
 	private static String validBody(String orderId, long amount) {

@@ -117,7 +117,8 @@ services:
       SPRING_RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
     healthcheck:
-      test: ["CMD", "curl", "-fs", "http://localhost:8081/actuator/health"]
+      # readiness, not plain health: it turns UP only after RpcWarmUp has run
+      test: ["CMD", "curl", "-fs", "http://localhost:8081/actuator/health/readiness"]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -139,7 +140,8 @@ services:
       SPRING_RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
     healthcheck:
-      test: ["CMD", "curl", "-fs", "http://localhost:8082/actuator/health"]
+      # readiness, not plain health: it turns UP only after RpcWarmUp has run
+      test: ["CMD", "curl", "-fs", "http://localhost:8082/actuator/health/readiness"]
       interval: 10s
       timeout: 5s
       retries: 12

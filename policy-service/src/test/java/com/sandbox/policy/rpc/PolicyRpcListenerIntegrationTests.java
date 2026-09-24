@@ -59,6 +59,9 @@ class PolicyRpcListenerIntegrationTests {
 	@Autowired
 	private JdbcTemplate jdbc;
 
+	@Autowired
+	private RpcWarmUp warmUp;
+
 	@BeforeEach
 	void clean() {
 		this.jdbc.update("DELETE FROM policies");
@@ -103,6 +106,14 @@ class PolicyRpcListenerIntegrationTests {
 		List<Map<String, ?>> deaths = dead.getMessageProperties().getXDeathHeader();
 		assertThat(deaths).isNotEmpty();
 		assertThat(deaths.get(0).get("reason")).isEqualTo("rejected");
+	}
+
+	@Test
+	void warmUpIssuesNothing(CapturedOutput output) {
+		this.warmUp.warmUp();
+
+		assertThat(this.jdbc.queryForObject("SELECT COUNT(*) FROM policies", Integer.class)).isZero();
+		assertThat(output).contains("\"action\":\"warm_up\"", "\"status\":\"SUCCESS\"");
 	}
 
 	private static String body(String orderId) {
