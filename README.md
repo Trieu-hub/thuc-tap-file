@@ -64,10 +64,12 @@ Kafka UI (tùy chọn): `docker compose --profile tools up -d kafka-ui`.
 
 ### Build và test không cần Docker
 
-```bash
+```powershell
 mvn -B package                   # build 4 module + chạy test (khoảng 8–10 phút, cần Docker cho Testcontainers)
-mvn -B -pl order-service -am test -Dtest=SandboxJsonLogFormatterTests -Dsurefire.failIfNoSpecifiedTests=false
+mvn -B -pl order-service -am test "-Dtest=SandboxJsonLogFormatterTests" "-Dsurefire.failIfNoSpecifiedTests=false"
 ```
+
+Trong PowerShell, tham số `-D...` có dấu chấm **phải đặt trong dấu nháy kép**. Nếu không, PowerShell tách `-Dsurefire.failIfNoSpecifiedTests=false` thành hai phần và Maven báo `Unknown lifecycle phase ".failIfNoSpecifiedTests=false"`.
 
 Nên `docker compose stop` trước khi chạy test. Các test đo thời gian (deadline 3 giây phải xong trong 2,9–3,5 giây) dễ fail khi Docker Desktop vừa chạy cả sandbox vừa chạy Testcontainers. Đã gặp 1 lần: một lần ghi MySQL bị khựng 3,8 giây nên cả request mất 7,1 giây, trong khi deadline gRPC vẫn đúng 3,19 giây. Khi đã dừng sandbox, 2 lần chạy liên tiếp đều pass.
 
@@ -136,57 +138,72 @@ Các đơn sau, khi hệ thống đã ổn định: `202` trong khoảng 220–3
 
 ### Xem Kafka UI
 
-```bash
+```powershell
 docker compose --profile tools up -d kafka-ui   # rồi mở http://localhost:8090
 ```
 
 Chọn cluster `sandbox` → **Topics**. Có 4 topic, mỗi topic 3 partition: `payment.recorded`, `policy.issued`, `payment.recorded.DLT`, `policy.issued.DLT`. Ở tab **Messages** của một topic sẽ thấy key (`order_id`), partition và value (envelope JSON). Mọi event của cùng một đơn luôn nằm trên cùng một partition.
 
-Gửi lại một event để thử chống trùng (Git Bash; hoặc dùng **Produce Message** trong Kafka UI với cùng key và value):
+Gửi lại một event để thử chống trùng (PowerShell; hoặc dùng **Produce Message** trong Kafka UI với cùng key và value). Thay `<ORDER_ID>` bằng mã một đơn Luồng 2 đã `ISSUED`:
 
-```bash
-EV=$(MSYS_NO_PATHCONV=1 docker compose exec -T kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic payment.recorded --from-beginning --property print.key=true --property key.separator='|' --timeout-ms 5000 2>/dev/null | grep <ORDER_ID> | head -1)
-printf '%s\n' "$EV" 'ORD-GARBAGE-1|{not json' | MSYS_NO_PATHCONV=1 docker compose exec -T kafka /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server localhost:9092 --topic payment.recorded --property parse.key=true --property key.separator='|'
+```powershell
+$id = '<ORDER_ID>'
+$ev = (docker compose exec -T kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic payment.recorded --from-beginning --formatter-property print.key=true --formatter-property 'key.separator=|' --timeout-ms 5000 2>$null | Select-String $id | Select-Object -First 1).Line.TrimStart([char]0xFEFF); "event: $ev"
+$ev, 'ORD-GARBAGE-1|{not json' | docker compose exec -T kafka sh -c "awk 'NR==1{sub(/^\357\273\277/,e)} {sub(/\r$/,e); print}' | /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server localhost:9092 --topic payment.recorded --reader-property parse.key=true --reader-property key.separator='|'"
+Start-Sleep -Seconds 3; docker compose logs --no-log-prefix --since 1m policy-service order-service | Select-String 'duplicate_event_ignored|event_dead_lettered' | ForEach-Object { $_.Line | ConvertFrom-Json } | Select-Object service, action, order_id, event_id | Format-Table -AutoSize
+"SELECT COUNT(*) AS policies FROM policy_db.policies WHERE order_id = '$id';" | docker compose exec -T mysql sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" 2>/dev/null'
 ```
+
+Lưu ý khi dùng PowerShell:
+- **BOM:** khi pipe vào `docker compose exec`, PowerShell có thể chèn BOM UTF-8 (`EF BB BF`) vào đầu dữ liệu, tùy `[Console]::InputEncoding` của máy, và thêm `\r` cuối mỗi dòng. BOM dính vào key sẽ làm key khác `order_id`, nên message rơi vào partition khác. Vì vậy dữ liệu đi qua `awk` trong container để bỏ BOM và `\r` trước khi tới Kafka. `.TrimStart([char]0xFEFF)` dùng cho trường hợp topic đã có sẵn bản ghi dính BOM. Đã kiểm tra: bản replay có cùng partition và cùng key (21 ký tự) với bản gốc.
+- Chuỗi trong `sh -c "..."` không chứa dấu nháy kép, vì PowerShell 5.1 làm mất dấu nháy kép khi truyền tham số cho chương trình ngoài.
+- `'key.separator=|'` phải nằm trong dấu nháy, nếu không `|` sẽ bị hiểu là pipe.
+- Câu SQL được đưa vào `mysql` qua pipe (stdin), không truyền bằng `-e "..."`: PowerShell 5.1 làm mất dấu nháy kép khi truyền tham số cho chương trình ngoài.
 
 Kết quả đã kiểm chứng:
 - policy-service log `duplicate_event_ignored` rồi publish lại `policy.issued`; order-service cũng log `duplicate_event_ignored`.
 - `policy_db.policies` vẫn chỉ có 1 dòng cho đơn đó, và timeline vẫn 4 bước.
 - Message `{not json` vào `payment.recorded.DLT` ngay (log `event_dead_lettered`), không retry.
 
-### Thử hai tình huống publish lỗi (Git Bash, đã chạy thật ngày 2026-09-25)
+### Thử hai tình huống publish lỗi (PowerShell, đã chạy thật ngày 2026-09-25)
 
-Cả hai tình huống đều làm hỏng Kafka có chủ đích. Nên chạy xong phần kiểm tra khác rồi mới làm.
+Cả hai tình huống đều làm hỏng Kafka có chủ đích. Nên chạy xong phần kiểm tra khác rồi mới làm. Chạy lần lượt từng dòng trong **cùng một cửa sổ PowerShell**, vì biến `$id` được giữ từ dòng này sang dòng sau.
 
 **A. Payment publish `payment.recorded` lỗi** (dual write: event mất thật):
 
-```bash
+```powershell
 docker compose stop kafka
-curl -s -w ' http=%{http_code}\n' -H 'Content-Type: application/json' -d '{"partner_order_id":"NOKAFKA-'$(date +%H%M%S)'","customer_name":"A","phone":"0901234567","amount":500000,"mode":"GRPC_KAFKA"}' localhost:8080/api/v1/orders
-docker compose logs --since 1m payment-service | grep event_publish_failed
+$body = '{"partner_order_id":"NOKAFKA-' + (Get-Date -Format HHmmss) + '","customer_name":"A","phone":"0901234567","amount":500000,"mode":"GRPC_KAFKA"}'; $r = Invoke-WebRequest -UseBasicParsing -Method Post -Uri http://localhost:8080/api/v1/orders -ContentType 'application/json' -Body $body; $a = $r.Content | ConvertFrom-Json; $id = $a.order_id; "http=$([int]$r.StatusCode) status=$($a.status) order_id=$id"
+Start-Sleep -Seconds 8; docker compose logs --no-log-prefix --since 1m payment-service | Select-String 'event_publish_failed' | ForEach-Object { $_.Line | ConvertFrom-Json } | Select-Object timestamp, action, order_id, status, execution_time_ms | Format-Table -AutoSize
 docker compose up -d --wait kafka
-curl -s localhost:8080/api/v1/orders/<ORDER_ID>
+Start-Sleep -Seconds 30; "status after Kafka is back: " + (Invoke-RestMethod "http://localhost:8080/api/v1/orders/$id").status
+"SELECT (SELECT COUNT(*) FROM payment_db.payments WHERE order_id = '$id') AS payments, (SELECT COUNT(*) FROM policy_db.policies WHERE order_id = '$id') AS policies;" | docker compose exec -T mysql sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" 2>/dev/null'
 ```
 
 Kết quả: `POST` vẫn trả `202 PAYMENT_RECORDED` (khoảng 1,3 s), vì response được gửi trước khi publish. Sau 5,4 s, payment-service log `event_publish_failed`. Bật lại Kafka và chờ 60 giây, đơn vẫn `PAYMENT_RECORDED`; `payment_db` có 1 dòng, `policy_db` có 0 dòng. Đây là giới hạn dual write, cách sửa đúng là Transactional Outbox.
 
 **B. Policy publish `policy.issued` lỗi, sau đó khôi phục.** Xóa topic `policy.issued` (broker đã tắt auto-create) để chỉ lần publish bị lỗi:
 
-```bash
-MSYS_NO_PATHCONV=1 docker compose exec -T kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --delete --topic policy.issued
-curl -s -w ' http=%{http_code}\n' -H 'Content-Type: application/json' -d '{"partner_order_id":"NOTOPIC-'$(date +%H%M%S)'","customer_name":"A","phone":"0901234567","amount":500000,"mode":"GRPC_KAFKA"}' localhost:8080/api/v1/orders
-sleep 35; docker compose logs --since 1m policy-service | grep -E 'IssuePolicy|event_publish_failed|event_dead_lettered'
+```powershell
+docker compose exec -T kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --delete --topic policy.issued
+$body = '{"partner_order_id":"NOTOPIC-' + (Get-Date -Format HHmmss) + '","customer_name":"A","phone":"0901234567","amount":500000,"mode":"GRPC_KAFKA"}'; $r = Invoke-WebRequest -UseBasicParsing -Method Post -Uri http://localhost:8080/api/v1/orders -ContentType 'application/json' -Body $body; $a = $r.Content | ConvertFrom-Json; $id = $a.order_id; "http=$([int]$r.StatusCode) status=$($a.status) order_id=$id"
+Start-Sleep -Seconds 35; docker compose logs --no-log-prefix --since 1m policy-service | Select-String 'IssuePolicy|event_publish_failed|event_dead_lettered' | ForEach-Object { $_.Line | ConvertFrom-Json } | Select-Object timestamp, action, outcome, execution_time_ms | Format-Table -AutoSize
+"status: " + (Invoke-RestMethod "http://localhost:8080/api/v1/orders/$id").status
 ```
 
 Kết quả: lần đầu `IssuePolicy outcome=ISSUED`, rồi `event_publish_failed` sau 5 s. Ba lần retry sau đó đều `DUPLICATE_EVENT_IGNORED` (không tạo hợp đồng mới) và thử publish lại nhưng vẫn lỗi. Cuối cùng log `event_dead_lettered`, event nằm trong `payment.recorded.DLT`. Đơn kẹt ở `PAYMENT_RECORDED`, `policy_db` có đúng 1 hợp đồng.
 
 Khôi phục: tạo lại topic (bean `NewTopic` chạy khi khởi động) rồi đẩy event từ DLT về topic gốc:
 
-```bash
-docker compose restart policy-service && docker compose up -d --wait policy-service
-EV=$(MSYS_NO_PATHCONV=1 docker compose exec -T kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic payment.recorded.DLT --from-beginning --property print.key=true --property key.separator='|' --timeout-ms 5000 2>/dev/null | grep <ORDER_ID> | head -1)
-printf '%s\n' "$EV" | MSYS_NO_PATHCONV=1 docker compose exec -T kafka /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server localhost:9092 --topic payment.recorded --property parse.key=true --property key.separator='|'
+```powershell
+docker compose restart policy-service; docker compose up -d --wait policy-service
+$ev = (docker compose exec -T kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic payment.recorded.DLT --from-beginning --formatter-property print.key=true --formatter-property 'key.separator=|' --timeout-ms 5000 2>$null | Select-String $id | Select-Object -First 1).Line.TrimStart([char]0xFEFF); "event from DLT: $ev"
+$ev | docker compose exec -T kafka sh -c "awk 'NR==1{sub(/^\357\273\277/,e)} {sub(/\r$/,e); print}' | /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server localhost:9092 --topic payment.recorded --reader-property parse.key=true --reader-property key.separator='|'"
+Start-Sleep -Seconds 5; "status: " + (Invoke-RestMethod "http://localhost:8080/api/v1/orders/$id").status
+"SELECT COUNT(*) AS policies FROM policy_db.policies WHERE order_id = '$id';" | docker compose exec -T mysql sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" 2>/dev/null'
 ```
+
+(PowerShell 5.1 không có `&&`, nên các lệnh nối nhau bằng `;`.)
 
 Kết quả: Policy log `DUPLICATE_EVENT_IGNORED` rồi `PublishPolicyIssued`; Order log `ApplyPolicyIssued outcome=APPLIED`. Khoảng 2 s sau đơn là `ISSUED`, vẫn 1 hợp đồng, timeline 4 bước. Đây là lý do Policy publish lại `policy.issued` khi gặp event trùng.
 
