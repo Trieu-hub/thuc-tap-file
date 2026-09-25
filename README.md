@@ -65,9 +65,11 @@ Kafka UI (tùy chọn): `docker compose --profile tools up -d kafka-ui`.
 ### Build và test không cần Docker
 
 ```bash
-mvn -B package                   # build 4 module + chạy test
+mvn -B package                   # build 4 module + chạy test (khoảng 8–10 phút, cần Docker cho Testcontainers)
 mvn -B -pl order-service -am test -Dtest=SandboxJsonLogFormatterTests -Dsurefire.failIfNoSpecifiedTests=false
 ```
+
+Nên `docker compose stop` trước khi chạy test. Các test đo thời gian (deadline 3 giây phải xong trong 2,9–3,5 giây) dễ fail khi Docker Desktop vừa chạy cả sandbox vừa chạy Testcontainers. Đã gặp 1 lần: một lần ghi MySQL bị khựng 3,8 giây nên cả request mất 7,1 giây, trong khi deadline gRPC vẫn đúng 3,19 giây. Khi đã dừng sandbox, 2 lần chạy liên tiếp đều pass.
 
 ---
 
@@ -151,6 +153,42 @@ Kết quả đã kiểm chứng:
 - policy-service log `duplicate_event_ignored` rồi publish lại `policy.issued`; order-service cũng log `duplicate_event_ignored`.
 - `policy_db.policies` vẫn chỉ có 1 dòng cho đơn đó, và timeline vẫn 4 bước.
 - Message `{not json` vào `payment.recorded.DLT` ngay (log `event_dead_lettered`), không retry.
+
+### Thử hai tình huống publish lỗi (Git Bash, đã chạy thật ngày 2026-09-25)
+
+Cả hai tình huống đều làm hỏng Kafka có chủ đích. Nên chạy xong phần kiểm tra khác rồi mới làm.
+
+**A. Payment publish `payment.recorded` lỗi** (dual write: event mất thật):
+
+```bash
+docker compose stop kafka
+curl -s -w ' http=%{http_code}\n' -H 'Content-Type: application/json' -d '{"partner_order_id":"NOKAFKA-'$(date +%H%M%S)'","customer_name":"A","phone":"0901234567","amount":500000,"mode":"GRPC_KAFKA"}' localhost:8080/api/v1/orders
+docker compose logs --since 1m payment-service | grep event_publish_failed
+docker compose up -d --wait kafka
+curl -s localhost:8080/api/v1/orders/<ORDER_ID>
+```
+
+Kết quả: `POST` vẫn trả `202 PAYMENT_RECORDED` (khoảng 1,3 s), vì response được gửi trước khi publish. Sau 5,4 s, payment-service log `event_publish_failed`. Bật lại Kafka và chờ 60 giây, đơn vẫn `PAYMENT_RECORDED`; `payment_db` có 1 dòng, `policy_db` có 0 dòng. Đây là giới hạn dual write, cách sửa đúng là Transactional Outbox.
+
+**B. Policy publish `policy.issued` lỗi, sau đó khôi phục.** Xóa topic `policy.issued` (broker đã tắt auto-create) để chỉ lần publish bị lỗi:
+
+```bash
+MSYS_NO_PATHCONV=1 docker compose exec -T kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --delete --topic policy.issued
+curl -s -w ' http=%{http_code}\n' -H 'Content-Type: application/json' -d '{"partner_order_id":"NOTOPIC-'$(date +%H%M%S)'","customer_name":"A","phone":"0901234567","amount":500000,"mode":"GRPC_KAFKA"}' localhost:8080/api/v1/orders
+sleep 35; docker compose logs --since 1m policy-service | grep -E 'IssuePolicy|event_publish_failed|event_dead_lettered'
+```
+
+Kết quả: lần đầu `IssuePolicy outcome=ISSUED`, rồi `event_publish_failed` sau 5 s. Ba lần retry sau đó đều `DUPLICATE_EVENT_IGNORED` (không tạo hợp đồng mới) và thử publish lại nhưng vẫn lỗi. Cuối cùng log `event_dead_lettered`, event nằm trong `payment.recorded.DLT`. Đơn kẹt ở `PAYMENT_RECORDED`, `policy_db` có đúng 1 hợp đồng.
+
+Khôi phục: tạo lại topic (bean `NewTopic` chạy khi khởi động) rồi đẩy event từ DLT về topic gốc:
+
+```bash
+docker compose restart policy-service && docker compose up -d --wait policy-service
+EV=$(MSYS_NO_PATHCONV=1 docker compose exec -T kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic payment.recorded.DLT --from-beginning --property print.key=true --property key.separator='|' --timeout-ms 5000 2>/dev/null | grep <ORDER_ID> | head -1)
+printf '%s\n' "$EV" | MSYS_NO_PATHCONV=1 docker compose exec -T kafka /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server localhost:9092 --topic payment.recorded --property parse.key=true --property key.separator='|'
+```
+
+Kết quả: Policy log `DUPLICATE_EVENT_IGNORED` rồi `PublishPolicyIssued`; Order log `ApplyPolicyIssued outcome=APPLIED`. Khoảng 2 s sau đơn là `ISSUED`, vẫn 1 hợp đồng, timeline 4 bước. Đây là lý do Policy publish lại `policy.issued` khi gặp event trùng.
 
 ---
 
@@ -252,6 +290,7 @@ current-state.md    tiến độ theo ngày
   - Order có thể đã báo `PAYMENT_TIMEOUT` trong khi Payment vẫn gạch nợ xong và hợp đồng thật sự được phát hành. Khi đó hiển thị `FAILED` cho một hợp đồng đang tồn tại là sai, nên đơn chuyển sang `ISSUED`.
 - **Event cho đơn không tồn tại không bị bỏ qua** (thay cho bản thiết kế ban đầu "log rồi commit offset"): `OrderNotFoundException` làm transaction rollback, kể cả dòng inbox, rồi event được thử lại 3 lần và vào `policy.issued.DLT` để người vận hành xem. Nếu âm thầm ack, event sẽ biến mất mà không để lại dấu vết.
 - **Dead Letter Topic tên `<topic>.DLT`**, khai báo tường minh (Spring Kafka 4 mặc định là `<topic>-dlt`). Mỗi DLT có 3 partition như topic gốc, vì record được chuyển sang đúng partition cũ.
+- **Warm-up gRPC ở order-service (`GrpcWarmUp`):** trước khi có bước này, lần gọi `RecordPayment` đầu tiên sau khi order-service khởi động mất 1381–2205 ms phía Order (khởi tạo channel, Netty, HTTP/2, nạp class), trong khi Payment chỉ xử lý 11–29 ms, nên khá sát deadline 3 giây. Lúc khởi động, Order gọi **gRPC health check chuẩn** (`grpc.health.v1.Health/Check`) trên đúng channel `payment`, không gọi `RecordPayment` giả vì như vậy sẽ tạo thanh toán rác. Healthcheck của compose dùng `/actuator/health/readiness`, nên container chỉ `healthy` sau khi đã warm-up. Đo lại: bước `PAYMENT` của đơn đầu tiên còn 49 ms.
 - **Không dùng header `__TypeId__`:** value là chuỗi JSON do `JsonMapper` của Spring Boot ghi (snake_case), bên nhận tự biết kiểu dữ liệu của topic mình đọc. Hai service không phụ thuộc tên class Java của nhau.
 
 ### Giới hạn đã biết (nói rõ khi demo)
@@ -260,4 +299,3 @@ current-state.md    tiến độ theo ngày
 - **Dual write ở Payment:** "commit DB rồi mới publish `payment.recorded`" không nguyên tử. Kafka chết đúng lúc đó thì event mất, đơn kẹt ở `PAYMENT_RECORDED`. Policy cũng ghi DB rồi mới publish `policy.issued`, nhưng trường hợp này đã có retry kèm publish lại. Cách làm đúng trong production là **Transactional Outbox**: ghi event vào bảng outbox trong cùng transaction, rồi một tiến trình khác đẩy lên Kafka. Bài này không làm Outbox.
 - **Event có thể về không theo thứ tự so với luồng gRPC:** `policy.issued` có thể tới Order trước khi Order ghi xong `PAYMENT_RECORDED`. Trạng thái chỉ đi tiến nên đơn vẫn là `ISSUED`, nhưng bước `PAYMENT` có thể nằm sau `POLICY_ISSUANCE` trong timeline. Giữa các event của cùng một đơn thì thứ tự được giữ, vì key là `order_id` nên chúng nằm cùng partition.
 - Không có job quét đơn treo: đơn kẹt ở `PAYMENT_RECORDED` (vì mất event) chỉ được phát hiện qua log `event_publish_failed`.
-- **Lần gọi gRPC đầu tiên sau khi order-service khởi động chậm hơn:** đo được 1381–2205 ms phía Order (khởi tạo channel, nạp class), trong khi Payment chỉ xử lý 11–29 ms. Con số này vẫn dưới deadline 3 giây nhưng khá sát. Các lần gọi sau khoảng 50–70 ms. Chưa có bước warm-up cho gRPC như `RpcWarmUp` của Luồng 1.
