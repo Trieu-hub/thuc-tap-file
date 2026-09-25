@@ -5,6 +5,7 @@ import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 
 import org.springframework.stereotype.Service;
 
@@ -12,6 +13,7 @@ import com.sandbox.contracts.payment.v1.PaymentServiceGrpc;
 import com.sandbox.contracts.payment.v1.PaymentStatus;
 import com.sandbox.contracts.payment.v1.RecordPaymentRequest;
 import com.sandbox.contracts.payment.v1.RecordPaymentResponse;
+import com.sandbox.payment.kafka.PaymentRecordedPublisher;
 import com.sandbox.payment.payment.PaymentRecorder;
 import com.sandbox.payment.payment.RecordPaymentCommand;
 import com.sandbox.payment.payment.RecordPaymentResult;
@@ -28,17 +30,21 @@ class PaymentGrpcService extends PaymentServiceGrpc.PaymentServiceImplBase {
 
 	private final PaymentRecorder recorder;
 
-	PaymentGrpcService(PaymentRecorder recorder) {
+	private final PaymentRecordedPublisher events;
+
+	PaymentGrpcService(PaymentRecorder recorder, PaymentRecordedPublisher events) {
 		this.recorder = recorder;
+		this.events = events;
 	}
 
 	@Override
 	public void recordPayment(RecordPaymentRequest request, StreamObserver<RecordPaymentResponse> responseObserver) {
 		long start = System.nanoTime();
+		RecordPaymentCommand command = new RecordPaymentCommand(request.getOrderId(), request.getPartnerOrderId(),
+				request.getPartnerTransactionId(), request.getAmount());
 		RecordPaymentResult result;
 		try {
-			result = this.recorder.record(new RecordPaymentCommand(request.getOrderId(), request.getPartnerOrderId(),
-					request.getPartnerTransactionId(), request.getAmount()));
+			result = this.recorder.record(command);
 		}
 		catch (RuntimeException ex) {
 			log.atError()
@@ -63,6 +69,13 @@ class PaymentGrpcService extends PaymentServiceGrpc.PaymentServiceImplBase {
 			.log("RecordPayment handled");
 		responseObserver.onNext(toResponse(result));
 		responseObserver.onCompleted();
+		// record() has returned, so its transaction is committed: the event never announces a payment
+		// that could still roll back. Sent after the response, so a slow or absent Kafka cannot push
+		// order-service past its deadline for a payment that is already recorded. A duplicate is
+		// published again (same event_id): policy-service deduplicates it.
+		if (result.status() == com.sandbox.payment.payment.PaymentStatus.RECORDED) {
+			this.events.publish(command, result, MDC.get("correlation_id"));
+		}
 	}
 
 	private static RecordPaymentResponse toResponse(RecordPaymentResult result) {

@@ -1,6 +1,7 @@
 package com.sandbox.policy.kafka;
 
 import org.apache.kafka.clients.admin.NewTopic;
+import org.apache.kafka.common.TopicPartition;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import tools.jackson.core.JacksonException;
@@ -46,7 +47,9 @@ class KafkaConfig {
 
 	@Bean
 	DefaultErrorHandler kafkaErrorHandler(KafkaTemplate<?, ?> kafkaTemplate) {
-		DeadLetterPublishingRecoverer deadLetters = new DeadLetterPublishingRecoverer(kafkaTemplate);
+		// Explicit name: Spring Kafka 4 defaults to "<topic>-dlt". Same partition as the original record.
+		DeadLetterPublishingRecoverer deadLetters = new DeadLetterPublishingRecoverer(kafkaTemplate,
+				(record, ex) -> new TopicPartition(record.topic() + ".DLT", record.partition()));
 		DefaultErrorHandler handler = new DefaultErrorHandler((record, ex) -> {
 			log.atError()
 				.addKeyValue("transport", "Kafka")
