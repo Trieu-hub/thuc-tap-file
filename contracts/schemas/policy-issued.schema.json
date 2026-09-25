@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sandbox.local/contracts/policy-issued.schema.json",
+  "title": "PolicyIssuedEvent",
+  "description": "Message on topic 'policy.issued', published by policy-service after the policy for an order is committed (or found already issued). Consumed by order-service. Key = order_id.",
+  "allOf": [{ "$ref": "event-envelope.schema.json" }],
+  "properties": {
+    "event_type": { "const": "policy.issued" },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["order_id", "policy_id", "policy_number", "issued_at"],
+      "properties": {
+        "order_id": { "type": "string", "minLength": 1 },
+        "policy_id": { "type": "string", "minLength": 1, "examples": ["POL-7d1e..."] },
+        "policy_number": { "type": "string", "pattern": "^ACBI-\\d{4}-\\d+$", "examples": ["ACBI-2026-048213"] },
+        "issued_at": { "type": "string", "format": "date-time" }
+      }
+    }
+  }
+}
