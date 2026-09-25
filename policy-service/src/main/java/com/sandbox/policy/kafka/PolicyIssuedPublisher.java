@@ -9,7 +9,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import tools.jackson.databind.json.JsonMapper;
 
-import org.springframework.kafka.KafkaException;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Component;
 
@@ -54,7 +53,9 @@ class PolicyIssuedPublisher {
 			Thread.currentThread().interrupt();
 			throw publishFailed(policy, event, start, ex);
 		}
-		catch (ExecutionException | TimeoutException | KafkaException ex) {
+		// RuntimeException too, not only Spring's KafkaException: with Kafka down, the first send after a
+		// start fails while creating the producer with org.apache.kafka.common.KafkaException (DNS).
+		catch (ExecutionException | TimeoutException | RuntimeException ex) {
 			throw publishFailed(policy, event, start, ex);
 		}
 		log.atInfo()
