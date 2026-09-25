@@ -26,6 +26,22 @@ spring:
         payment:
           # Local run; docker-compose.yml overrides it with static://payment-service:9090.
           target: static://localhost:9090
+  kafka:
+    bootstrap-servers: localhost:9094   # host listener (F25); compose sets kafka:9092
+    producer:
+      # Only used to copy failed records to policy.issued.DLT.
+      acks: all
+      properties:
+        enable.idempotence: true
+        max.block.ms: 5000
+    consumer:
+      group-id: order-service
+      auto-offset-reset: earliest        # a new group starts at the oldest event, none is skipped
+      enable-auto-commit: false          # no commit on a timer, only after the listener returned
+    listener:
+      # Commit each record's offset after the listener returned, i.e. after its DB transaction
+      # committed: a crash in between redelivers the event, and the inbox skips it (at-least-once).
+      ack-mode: record
 
 sandbox:
   grpc:
