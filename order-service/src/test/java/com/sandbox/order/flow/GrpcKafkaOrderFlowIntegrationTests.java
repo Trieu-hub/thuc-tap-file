@@ -9,6 +9,7 @@ import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -21,23 +22,31 @@ import io.grpc.ServerInterceptor;
 import io.grpc.ServerInterceptors;
 import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
+import org.apache.kafka.clients.admin.NewTopic;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
+import org.testcontainers.kafka.KafkaContainer;
 import org.testcontainers.mysql.MySQLContainer;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
+import org.springframework.context.annotation.Bean;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.kafka.config.KafkaListenerEndpointRegistry;
+import org.springframework.kafka.config.TopicBuilder;
+import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 
@@ -47,21 +56,31 @@ import com.sandbox.contracts.payment.v1.RecordPaymentRequest;
 import com.sandbox.contracts.payment.v1.RecordPaymentResponse;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 
 /**
- * Flow 2, synchronous part, over real HTTP and a real gRPC (HTTP/2) connection. payment-service runs
- * in its own JVM, so a fake gRPC server built from the same payment.proto stands in for it; it can
- * answer RECORDED, REJECTED, an error status, or 4 s late. MySQL 8.4 via Testcontainers; skipped
- * without Docker.
+ * Flow 2 from order-service's side, over real HTTP, a real gRPC (HTTP/2) connection and a real Kafka
+ * 4.2 (topic auto-creation off). payment-service and policy-service run in their own JVMs, so a fake
+ * gRPC server built from the same payment.proto stands in for payment (RECORDED, REJECTED, an error
+ * status, or 4 s late), and the test itself produces policy.issued as policy-service would. MySQL 8.4
+ * via Testcontainers; skipped without Docker. The real three-service run is the README's end-to-end check.
  */
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
+		properties = { "spring.kafka.listener.auto-startup=true", "spring.kafka.admin.auto-create=true" })
 @Testcontainers(disabledWithoutDocker = true)
 @ExtendWith(OutputCaptureExtension.class)
+// Close the context with the class: its consumer would otherwise keep polling the stopped container.
+@DirtiesContext
 class GrpcKafkaOrderFlowIntegrationTests {
 
 	@Container
 	@ServiceConnection
 	static MySQLContainer mysql = new MySQLContainer("mysql:8.4");
+
+	@Container
+	@ServiceConnection
+	static KafkaContainer kafka = new KafkaContainer("apache/kafka:4.2.1")
+		.withEnv("KAFKA_AUTO_CREATE_TOPICS_ENABLE", "false");
 
 	static final FakePayment payment = new FakePayment();
 
@@ -77,6 +96,12 @@ class GrpcKafkaOrderFlowIntegrationTests {
 
 	@Autowired
 	private JdbcTemplate jdbc;
+
+	@Autowired
+	private KafkaTemplate<String, String> kafkaTemplate;
+
+	@Autowired
+	private KafkaListenerEndpointRegistry listeners;
 
 	@DynamicPropertySource
 	static void paymentTarget(DynamicPropertyRegistry registry) {
@@ -110,6 +135,47 @@ class GrpcKafkaOrderFlowIntegrationTests {
 		assertThat(output.getOut().lines())
 			.anyMatch((line) -> line.contains("\"transport\":\"gRPC\"") && line.contains("\"action\":\"RecordPayment\"")
 					&& line.contains("\"correlation_id\":\"" + correlationId + "\""));
+	}
+
+	@Test
+	void acceptedOrderReachesIssuedWhenPolicyIssuedArrives(CapturedOutput output) throws Exception {
+		await().atMost(Duration.ofSeconds(30))
+			.until(() -> this.listeners.getListenerContainers()
+				.stream()
+				.allMatch((container) -> container.getAssignedPartitions() != null
+						&& !container.getAssignedPartitions().isEmpty()));
+
+		HttpResponse<String> response = post(order("P-E2E"));
+		assertThat(response.statusCode()).isEqualTo(202);
+		JsonNode accepted = json(response);
+		String orderId = accepted.path("order_id").asString();
+		String correlationId = accepted.path("correlation_id").asString();
+		assertThat(accepted.path("status").asString()).isEqualTo("PAYMENT_RECORDED");
+
+		// policy-service's part: it received payment.recorded and publishes policy.issued, key = order_id.
+		this.kafkaTemplate.send("policy.issued", orderId, """
+				{"event_id":"%s","event_type":"policy.issued","correlation_id":"%s","occurred_at":"%s",
+				 "payload":{"order_id":"%s","policy_id":"POL-E2E","policy_number":"ACBI-2026-424242","issued_at":"%s"}}"""
+			.formatted(UUID.randomUUID(), correlationId, Instant.now(), orderId, Instant.now()))
+			.get();
+
+		// What the UI does: poll GET until the order is final.
+		JsonNode issued = await().atMost(Duration.ofSeconds(15))
+			.pollInterval(Duration.ofMillis(200))
+			.until(() -> json(get("/api/v1/orders/" + orderId)),
+					(order) -> "ISSUED".equals(order.path("status").asString())
+							&& steps(order).contains("NOTIFICATION"));
+		assertThat(issued.path("policy_number").asString()).isEqualTo("ACBI-2026-424242");
+		assertThat(steps(issued)).containsExactly("ORDER_CREATED", "PAYMENT", "POLICY_ISSUANCE", "NOTIFICATION");
+		assertThat(issued.path("timeline").get(1).path("transport").asString()).isEqualTo("gRPC");
+		assertThat(issued.path("timeline").get(2).path("transport").asString()).isEqualTo("Kafka");
+		// One correlation_id across the HTTP, gRPC and Kafka hops of order-service, and sent to payment.
+		assertThat(payment.correlationIds).containsExactly(correlationId);
+		for (String transport : List.of("HTTP", "gRPC", "Kafka")) {
+			assertThat(output.getOut().lines()).as(transport)
+				.anyMatch((line) -> line.contains("\"transport\":\"" + transport + "\"")
+						&& line.contains("\"correlation_id\":\"" + correlationId + "\""));
+		}
 	}
 
 	@Test
@@ -180,6 +246,11 @@ class GrpcKafkaOrderFlowIntegrationTests {
 			.build(), HttpResponse.BodyHandlers.ofString());
 	}
 
+	private HttpResponse<String> get(String path) throws Exception {
+		return this.http.send(HttpRequest.newBuilder(URI.create("http://localhost:" + this.port + path)).GET().build(),
+				HttpResponse.BodyHandlers.ofString());
+	}
+
 	private JsonNode json(HttpResponse<String> response) {
 		return this.jsonMapper.readTree(response.body());
 	}
@@ -195,6 +266,17 @@ class GrpcKafkaOrderFlowIntegrationTests {
 		catch (IOException ex) {
 			throw new UncheckedIOException(ex);
 		}
+	}
+
+	@TestConfiguration(proxyBeanMethods = false)
+	static class Topics {
+
+		/** Declared by policy-service in the real system; the test produces to it. */
+		@Bean
+		NewTopic policyIssuedTopic() {
+			return TopicBuilder.name("policy.issued").partitions(3).replicas(1).build();
+		}
+
 	}
 
 	/** Stand-in for payment-service: same generated service base class, configurable answer. */
