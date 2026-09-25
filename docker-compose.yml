@@ -178,7 +178,8 @@ services:
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       SPRING_GRPC_CLIENT_CHANNEL_PAYMENT_TARGET: static://payment-service:9090
     healthcheck:
-      test: ["CMD", "curl", "-fs", "http://localhost:8080/actuator/health"]
+      # readiness, not plain health: it turns UP only after GrpcWarmUp has run
+      test: ["CMD", "curl", "-fs", "http://localhost:8080/actuator/health/readiness"]
       interval: 10s
       timeout: 5s
       retries: 12
