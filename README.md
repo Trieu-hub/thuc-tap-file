@@ -174,7 +174,7 @@ Cả hai tình huống đều làm hỏng Kafka có chủ đích. Nên chạy xo
 ```powershell
 docker compose stop kafka
 $body = '{"partner_order_id":"NOKAFKA-' + (Get-Date -Format HHmmss) + '","customer_name":"A","phone":"0901234567","amount":500000,"mode":"GRPC_KAFKA"}'; $r = Invoke-WebRequest -UseBasicParsing -Method Post -Uri http://localhost:8080/api/v1/orders -ContentType 'application/json' -Body $body; $a = $r.Content | ConvertFrom-Json; $id = $a.order_id; "http=$([int]$r.StatusCode) status=$($a.status) order_id=$id"
-Start-Sleep -Seconds 8; docker compose logs --no-log-prefix --since 1m payment-service | Select-String 'event_publish_failed' | ForEach-Object { $_.Line | ConvertFrom-Json } | Select-Object timestamp, action, order_id, status, execution_time_ms | Format-Table -AutoSize
+Start-Sleep -Seconds 8; docker compose logs --no-log-prefix payment-service | Select-String $id | ForEach-Object { $_.Line | ConvertFrom-Json } | Select-Object timestamp, transport, action, status, execution_time_ms | Format-Table -AutoSize
 docker compose up -d --wait kafka
 Start-Sleep -Seconds 30; "status after Kafka is back: " + (Invoke-RestMethod "http://localhost:8080/api/v1/orders/$id").status
 "SELECT (SELECT COUNT(*) FROM payment_db.payments WHERE order_id = '$id') AS payments, (SELECT COUNT(*) FROM policy_db.policies WHERE order_id = '$id') AS policies;" | docker compose exec -T mysql sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" 2>/dev/null'
@@ -187,7 +187,7 @@ Kết quả: `POST` vẫn trả `202 PAYMENT_RECORDED` (khoảng 1,3 s), vì res
 ```powershell
 docker compose exec -T kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --delete --topic policy.issued
 $body = '{"partner_order_id":"NOTOPIC-' + (Get-Date -Format HHmmss) + '","customer_name":"A","phone":"0901234567","amount":500000,"mode":"GRPC_KAFKA"}'; $r = Invoke-WebRequest -UseBasicParsing -Method Post -Uri http://localhost:8080/api/v1/orders -ContentType 'application/json' -Body $body; $a = $r.Content | ConvertFrom-Json; $id = $a.order_id; "http=$([int]$r.StatusCode) status=$($a.status) order_id=$id"
-Start-Sleep -Seconds 35; docker compose logs --no-log-prefix --since 1m policy-service | Select-String 'IssuePolicy|event_publish_failed|event_dead_lettered' | ForEach-Object { $_.Line | ConvertFrom-Json } | Select-Object timestamp, action, outcome, execution_time_ms | Format-Table -AutoSize
+Start-Sleep -Seconds 35; docker compose logs --no-log-prefix policy-service | Select-String $id | ForEach-Object { $_.Line | ConvertFrom-Json } | Where-Object { $_.action } | Select-Object timestamp, action, outcome, execution_time_ms | Format-Table -AutoSize
 "status: " + (Invoke-RestMethod "http://localhost:8080/api/v1/orders/$id").status
 ```
 
