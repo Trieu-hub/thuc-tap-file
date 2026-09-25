@@ -72,6 +72,9 @@ class PaymentGrpcServiceIntegrationTests {
 	private Probe probe;
 
 	@Autowired
+	private GrpcServerWarmUp warmUp;
+
+	@Autowired
 	private KafkaListenerEndpointRegistry listeners;
 
 	@Autowired
@@ -160,6 +163,20 @@ class PaymentGrpcServiceIntegrationTests {
 			.isZero();
 		awaitEvents("ORD-2", 1);
 		assertThat(this.probe.records).noneMatch((record) -> "ORD-1".equals(record.key()));
+	}
+
+	@Test
+	void warmUpGoesThroughTheServerAndLeavesNoPaymentOrEvent(CapturedOutput output) {
+		this.warmUp.warmUp(this.grpcPort.port);
+		// A later real payment proves the probe is reading; no WARMUP record may appear before it.
+		stub("corr-after-warm-up").recordPayment(request("ORD-2", 500_000));
+
+		assertThat(output).contains("\"action\":\"warm_up\"", "\"status\":\"SUCCESS\"", "\"warm_up_reply\":\"REJECTED\"",
+				"\"transport\":\"gRPC\"", "\"action\":\"RecordPayment\"");
+		assertThat(this.jdbc.queryForObject("SELECT COUNT(*) FROM payments WHERE order_id LIKE 'WARMUP-%'",
+				Integer.class)).isZero();
+		awaitEvents("ORD-2", 1);
+		assertThat(this.probe.records).noneMatch((record) -> record.key().startsWith("WARMUP-"));
 	}
 
 	private List<ConsumerRecord<String, String>> awaitEvents(String orderId, int count) {
