@@ -21,6 +21,18 @@ spring:
       simple:
         # A message that throws goes to the DLQ once instead of being redelivered forever (F8).
         default-requeue-rejected: false
+  grpc:
+    server:
+      port: 9090   # Flow 2: PaymentService.RecordPayment (Netty, HTTP/2), separate from the HTTP port
+  kafka:
+    bootstrap-servers: localhost:9094   # host listener (F25); compose sets kafka:9092
+    producer:
+      # Key and value are Strings (Boot's default serializers): the value is the envelope as JSON,
+      # written with Boot's mapper, so no __TypeId__ header naming a Java class is needed.
+      acks: all                          # the write is on every in-sync replica before send() succeeds
+      properties:
+        enable.idempotence: true         # a producer retry cannot write the record twice
+        max.block.ms: 5000               # Kafka down: send() gives up after 5 s instead of 60 s
 
 server:
   port: 8081
@@ -40,4 +52,3 @@ logging:
   structured:
     format:
       console: com.sandbox.payment.observability.SandboxJsonLogFormatter
-# gRPC server (port 9090) is added on Day 3 with spring-boot-starter-grpc-server (CLAUDE.md D16).

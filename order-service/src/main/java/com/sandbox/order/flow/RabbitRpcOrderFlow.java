@@ -1,18 +1,12 @@
 package com.sandbox.order.flow;
 
-import java.time.LocalDate;
-import java.time.ZoneOffset;
-import java.time.format.DateTimeFormatter;
-import java.util.Locale;
 import java.util.Optional;
-import java.util.UUID;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
 
 import org.springframework.amqp.AmqpException;
-import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 
 import com.sandbox.order.notification.NotificationWorker;
@@ -48,7 +42,7 @@ public class RabbitRpcOrderFlow {
 
 	private static final Logger log = LoggerFactory.getLogger(RabbitRpcOrderFlow.class);
 
-	private static final DateTimeFormatter ORDER_DATE = DateTimeFormatter.ofPattern("yyyyMMdd");
+	private final OrderIntake intake;
 
 	private final OrderRepository orders;
 
@@ -58,8 +52,9 @@ public class RabbitRpcOrderFlow {
 
 	private final NotificationWorker notifications;
 
-	public RabbitRpcOrderFlow(OrderRepository orders, OrderProgressService progress, OrderRpcClient rpc,
+	public RabbitRpcOrderFlow(OrderIntake intake, OrderRepository orders, OrderProgressService progress, OrderRpcClient rpc,
 			NotificationWorker notifications) {
+		this.intake = intake;
 		this.orders = orders;
 		this.progress = progress;
 		this.rpc = rpc;
@@ -68,16 +63,14 @@ public class RabbitRpcOrderFlow {
 
 	public OrderResult place(PlaceOrderCommand command) {
 		long start = System.nanoTime();
-		Optional<OrderView> existing = this.orders.findByPartnerOrderId(command.partnerOrderId());
-		if (existing.isPresent()) {
-			return replay(existing.get(), start);
+		Optional<OrderResult> replay = this.intake.replay(command.partnerOrderId(), start);
+		if (replay.isPresent()) {
+			return replay.get();
 		}
-		NewOrder order = new NewOrder(newOrderId(), command.partnerOrderId(), command.customerName(),
-				command.phone(), command.amount(), OrderMode.RABBITMQ_RPC, UUID.randomUUID().toString(),
-				"TXN-" + command.partnerOrderId());
+		NewOrder order = this.intake.newOrder(command, OrderMode.RABBITMQ_RPC);
 		MDC.put("correlation_id", order.correlationId());
 		try {
-			insert(order, start);
+			this.intake.insert(order, start);
 			run(order);
 			OrderView result = this.orders.findById(order.orderId()).orElseThrow();
 			log.atInfo()
@@ -91,39 +84,6 @@ public class RabbitRpcOrderFlow {
 		}
 		finally {
 			MDC.remove("correlation_id");
-		}
-	}
-
-	private OrderResult replay(OrderView order, long start) {
-		MDC.put("correlation_id", order.correlationId());
-		try {
-			log.atInfo()
-				.addKeyValue("transport", "HTTP")
-				.addKeyValue("action", "idempotent_replay")
-				.addKeyValue("order_id", order.orderId())
-				.addKeyValue("status", order.status().name())
-				.addKeyValue("execution_time_ms", elapsedMs(start))
-				.log("Duplicate partner_order_id, returning the stored order");
-			return new OrderResult(order, true);
-		}
-		finally {
-			MDC.remove("correlation_id");
-		}
-	}
-
-	private void insert(NewOrder order, long start) {
-		try {
-			this.orders.insertCreated(order, new TimelineEntry(TimelineStep.ORDER_CREATED, "order-service", "HTTP",
-					"SUCCESS", elapsedMs(start), null));
-		}
-		catch (DuplicateKeyException ex) {
-			// The lookup above found nothing, so an identical request inserted in between (D11).
-			log.atInfo()
-				.addKeyValue("transport", "HTTP")
-				.addKeyValue("action", "concurrent_duplicate_rejected")
-				.addKeyValue("partner_order_id", order.partnerOrderId())
-				.log("Identical request is already being processed");
-			throw new OrderConflictException(order.partnerOrderId());
 		}
 	}
 
@@ -212,15 +172,6 @@ public class RabbitRpcOrderFlow {
 			.addKeyValue("status", status)
 			.addKeyValue("execution_time_ms", elapsedMs)
 			.log("RPC reply received");
-	}
-
-	/**
-	 * e.g. ORD-20260924-4F7A2C1B. A random suffix needs no sequence table shared between instances; a
-	 * collision would fail the insert on the primary key instead of overwriting another order.
-	 */
-	private static String newOrderId() {
-		String random = UUID.randomUUID().toString().substring(0, 8).toUpperCase(Locale.ROOT);
-		return "ORD-" + LocalDate.now(ZoneOffset.UTC).format(ORDER_DATE) + "-" + random;
 	}
 
 	private static long elapsedMs(long startNanos) {

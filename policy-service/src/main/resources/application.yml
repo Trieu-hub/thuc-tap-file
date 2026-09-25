@@ -21,6 +21,23 @@ spring:
       simple:
         # A message that throws goes to the DLQ once instead of being redelivered forever (F8).
         default-requeue-rejected: false
+  kafka:
+    bootstrap-servers: localhost:9094   # host listener (F25); compose sets kafka:9092
+    producer:
+      # Key and value are Strings (Boot's default serializers): the value is the envelope as JSON,
+      # written with Boot's mapper, so no __TypeId__ header naming a Java class is needed.
+      acks: all                          # the write is on every in-sync replica before send() succeeds
+      properties:
+        enable.idempotence: true         # a producer retry cannot write the record twice
+        max.block.ms: 5000               # Kafka down: send() gives up after 5 s instead of 60 s
+    consumer:
+      group-id: policy-service
+      auto-offset-reset: earliest        # a new group starts at the oldest event, none is skipped
+      enable-auto-commit: false          # no commit on a timer, only after the listener returned
+    listener:
+      # Commit each record's offset after the listener returned, i.e. after its DB transaction
+      # committed: a crash in between redelivers the event, and the inbox skips it (at-least-once).
+      ack-mode: record
 
 server:
   port: 8082

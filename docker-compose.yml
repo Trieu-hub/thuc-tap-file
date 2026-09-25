@@ -154,6 +154,19 @@ services:
       dockerfile: docker/service.Dockerfile
       args:
         SERVICE: order-service
+    # Replaces the common list (YAML merge is shallow), so the infrastructure is repeated here.
+    # Waiting for payment-service means the first GRPC_KAFKA order does not hit UNAVAILABLE.
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      payment-service:
+        condition: service_healthy
     ports:
       - "8080:8080"
     environment:
@@ -163,6 +176,7 @@ services:
       SPRING_RABBITMQ_USERNAME: ${RABBITMQ_USER}
       SPRING_RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      SPRING_GRPC_CLIENT_CHANNEL_PAYMENT_TARGET: static://payment-service:9090
     healthcheck:
       test: ["CMD", "curl", "-fs", "http://localhost:8080/actuator/health"]
       interval: 10s
