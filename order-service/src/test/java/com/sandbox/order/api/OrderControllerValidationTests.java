@@ -1,5 +1,7 @@
 package com.sandbox.order.api;
 
+import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 
 import org.junit.jupiter.api.Test;
@@ -10,8 +12,13 @@ import org.springframework.http.MediaType;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 
+import com.sandbox.order.flow.GrpcKafkaOrderFlow;
+import com.sandbox.order.flow.OrderResult;
 import com.sandbox.order.flow.RabbitRpcOrderFlow;
+import com.sandbox.order.order.OrderMode;
 import com.sandbox.order.order.OrderRepository;
+import com.sandbox.order.order.OrderStatus;
+import com.sandbox.order.order.OrderView;
 
 import static org.hamcrest.Matchers.contains;
 import static org.mockito.ArgumentMatchers.any;
@@ -32,6 +39,9 @@ class OrderControllerValidationTests {
 
 	@MockitoBean
 	private RabbitRpcOrderFlow flow;
+
+	@MockitoBean
+	private GrpcKafkaOrderFlow grpcKafkaFlow;
 
 	@MockitoBean
 	private OrderRepository orders;
@@ -66,13 +76,32 @@ class OrderControllerValidationTests {
 	}
 
 	@Test
-	void grpcKafkaModeIsNotImplementedYet() throws Exception {
+	void grpcKafkaModeGoesToFlow2AndIsAcceptedWith202() throws Exception {
+		given(this.grpcKafkaFlow.place(any()))
+			.willReturn(new OrderResult(order(OrderStatus.PAYMENT_RECORDED), false));
+
 		this.mockMvc
 			.perform(post("/api/v1/orders").contentType(MediaType.APPLICATION_JSON).content("""
 					{"partner_order_id":"P-1","customer_name":"A","phone":"0901234567","amount":500000,"mode":"GRPC_KAFKA"}"""))
-			.andExpect(status().isNotImplemented())
-			.andExpect(jsonPath("$.error").value("MODE_NOT_IMPLEMENTED"));
+			.andExpect(status().isAccepted())
+			.andExpect(jsonPath("$.status").value("PAYMENT_RECORDED"));
 		verify(this.flow, never()).place(any());
+	}
+
+	@Test
+	void grpcKafkaFailureOrReplayIsAnsweredWith200() throws Exception {
+		String body = """
+				{"partner_order_id":"P-1","customer_name":"A","phone":"0901234567","amount":500000,"mode":"GRPC_KAFKA"}""";
+		given(this.grpcKafkaFlow.place(any()))
+			.willReturn(new OrderResult(order(OrderStatus.PROCESSING_FAILED), false))
+			.willReturn(new OrderResult(order(OrderStatus.PAYMENT_RECORDED), true));
+
+		this.mockMvc.perform(post("/api/v1/orders").contentType(MediaType.APPLICATION_JSON).content(body))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.status").value("PROCESSING_FAILED"));
+		this.mockMvc.perform(post("/api/v1/orders").contentType(MediaType.APPLICATION_JSON).content(body))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.idempotent_replay").value(true));
 	}
 
 	@Test
@@ -82,6 +111,12 @@ class OrderControllerValidationTests {
 		this.mockMvc.perform(get("/api/v1/orders/ORD-404"))
 			.andExpect(status().isNotFound())
 			.andExpect(jsonPath("$.error").value("ORDER_NOT_FOUND"));
+	}
+
+	private static OrderView order(OrderStatus status) {
+		Instant now = Instant.now();
+		return new OrderView("ORD-1", "P-1", "A", "0901234567", 500_000, OrderMode.GRPC_KAFKA, status, null, "corr-1",
+				null, now, now, List.of());
 	}
 
 }

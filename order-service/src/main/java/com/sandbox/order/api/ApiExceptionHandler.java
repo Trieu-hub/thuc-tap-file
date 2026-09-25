@@ -55,11 +55,6 @@ class ApiExceptionHandler {
 		return error(HttpStatus.NOT_FOUND, "ORDER_NOT_FOUND", ex.getMessage(), List.of());
 	}
 
-	@ExceptionHandler(ModeNotImplementedException.class)
-	ResponseEntity<ApiError> notImplemented(ModeNotImplementedException ex) {
-		return error(HttpStatus.NOT_IMPLEMENTED, "MODE_NOT_IMPLEMENTED", ex.getMessage(), List.of());
-	}
-
 	private static ResponseEntity<ApiError> error(HttpStatus status, String code, String message,
 			List<FieldViolation> violations) {
 		return ResponseEntity.status(status).body(new ApiError(status.value(), code, message, violations));

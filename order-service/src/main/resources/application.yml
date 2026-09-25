@@ -20,6 +20,17 @@ spring:
     template:
       # convertSendAndReceive returns null after this, it does not throw (D7). Default is 5000.
       reply-timeout: 3000
+  grpc:
+    client:
+      channel:
+        payment:
+          # Local run; docker-compose.yml overrides it with static://payment-service:9090.
+          target: static://localhost:9090
+
+sandbox:
+  grpc:
+    # Deadline of each RecordPayment call, same budget as the Flow 1 RPC timeout (D8).
+    payment-deadline: 3000ms
 
 server:
   port: 8080

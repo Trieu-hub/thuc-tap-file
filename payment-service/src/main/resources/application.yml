@@ -21,6 +21,9 @@ spring:
       simple:
         # A message that throws goes to the DLQ once instead of being redelivered forever (F8).
         default-requeue-rejected: false
+  grpc:
+    server:
+      port: 9090   # Flow 2: PaymentService.RecordPayment (Netty, HTTP/2), separate from the HTTP port
 
 server:
   port: 8081
@@ -40,4 +43,3 @@ logging:
   structured:
     format:
       console: com.sandbox.payment.observability.SandboxJsonLogFormatter
-# gRPC server (port 9090) is added on Day 3 with spring-boot-starter-grpc-server (CLAUDE.md D16).
