@@ -40,10 +40,17 @@ Chi tiết tiến độ xem [`current-state.md`](current-state.md).
 
 **Yêu cầu:** Docker Desktop (đang chạy). Để build ngoài Docker cần thêm JDK 21 và Maven 3.9.
 
-```bash
-docker compose up --build -d     # lần đầu mất vài phút (Maven tải dependency)
-docker compose ps                # mọi service (trừ ui) phải ở trạng thái (healthy)
+```powershell
+docker compose up --build -d --wait   # sau khi đổi code: build 3 image + khởi động, trả về khi mọi service healthy
+docker compose up -d --wait           # code không đổi: không build, giữ nguyên container đang chạy
+docker compose ps                     # mọi service (trừ ui) phải ở trạng thái (healthy)
 ```
+
+Thời gian (đo ngày 2026-09-26):
+- `up --build` sau khi đổi code: khoảng 2–2,5 phút. Cả 3 image dùng chung **một** lần build Maven (`docker/service.Dockerfile`). Trước đây mỗi image tự build riêng và phải chờ nhau, mất khoảng 8,7 phút.
+- `up -d --wait` khi sandbox đang chạy: khoảng 3 giây.
+
+**Chỉ dùng `--build` khi code thay đổi.** Kể cả khi mọi layer đã có trong cache, mỗi lần build Docker Desktop vẫn gắn metadata có thời gian vào image, nên image nhận ID mới. Compose khi đó tạo lại cả 3 container (khoảng 1 phút), và **log cũ bị mất**, gồm cả log đang dùng để truy vết `correlation_id` khi demo.
 
 Dừng: `docker compose down` (thêm `-v` để xóa dữ liệu MySQL).
 Kafka UI (tùy chọn): `docker compose --profile tools up -d kafka-ui`.
@@ -62,16 +69,32 @@ Kafka UI (tùy chọn): `docker compose --profile tools up -d kafka-ui`.
 | Redis | `localhost:6379` |
 | Kafka (từ máy host) | `localhost:9094` |
 
-### Build và test không cần Docker
+### Build và test (PowerShell)
 
-```powershell
-mvn -B package                   # build 4 module + chạy test (khoảng 8–10 phút, cần Docker cho Testcontainers)
-mvn -B -pl order-service -am test "-Dtest=SandboxJsonLogFormatterTests" "-Dsurefire.failIfNoSpecifiedTests=false"
-```
+| Mục đích | Lệnh | Thời gian |
+|---|---|---|
+| Khởi động để demo / test tay (code không đổi) | `docker compose up -d --wait` | khoảng 3 giây nếu đang chạy, khoảng 70 giây nếu sandbox đang dừng |
+| Khởi động sau khi đổi code | `docker compose up --build -d --wait` | khoảng 2–2,5 phút |
+| Kiểm tra code compile được, không chạy test | `mvn -B -ntp -T 1C package -DskipTests` | khoảng 10 giây (đo được 9 giây) |
+| **Chạy toàn bộ test** | `powershell -ExecutionPolicy Bypass -File scripts\run-tests.ps1` | khoảng 9 phút (đã gồm dừng và bật lại sandbox) |
+| Chạy một test class | `mvn -B -pl order-service -am test "-Dtest=GrpcWarmUpTests" "-Dsurefire.failIfNoSpecifiedTests=false"` | |
 
-Trong PowerShell, tham số `-D...` có dấu chấm **phải đặt trong dấu nháy kép**. Nếu không, PowerShell tách `-Dsurefire.failIfNoSpecifiedTests=false` thành hai phần và Maven báo `Unknown lifecycle phase ".failIfNoSpecifiedTests=false"`.
+Muốn demo thì **không cần chạy test**: `docker compose up --build` tự build jar bên trong Docker.
 
-Nên `docker compose stop` trước khi chạy test. Các test đo thời gian (deadline 3 giây phải xong trong 2,9–3,5 giây) dễ fail khi Docker Desktop vừa chạy cả sandbox vừa chạy Testcontainers. Đã gặp 1 lần: một lần ghi MySQL bị khựng 3,8 giây nên cả request mất 7,1 giây, trong khi deadline gRPC vẫn đúng 3,19 giây. Khi đã dừng sandbox, 2 lần chạy liên tiếp đều pass.
+Dùng `scripts\run-tests.ps1` thay cho `mvn -B package`:
+- Script tạm dừng sandbox trong lúc test rồi bật lại. Test tích hợp tự khởi động MySQL, RabbitMQ và Kafka riêng (Testcontainers); nếu chạy song song với sandbox, Docker Desktop thiếu CPU và RAM, và test đo thời gian (deadline 3 giây phải trả lời trong 2,9–3,5 giây) có thể fail. Đã gặp 1 lần: MySQL khựng 3,8 giây.
+- Script chỉ in tóm tắt từng module; log đầy đủ nằm ở `target\run-tests.log`.
+
+### Khi build hoặc khởi động bị lỗi
+
+| Hiện tượng | Nguyên nhân | Cách xử lý |
+|---|---|---|
+| `Unknown lifecycle phase ".failIfNoSpecifiedTests=false"` | PowerShell tách tham số `-D...` có dấu chấm | Đặt tham số trong nháy kép: `"-Dsurefire.failIfNoSpecifiedTests=false"` |
+| `mvn` báo thiếu class hoặc `cannot find symbol` dù code đúng, chạy lại thì hết | Java language server của Cursor/VS Code build cùng lúc vào `target/` | Đóng Cursor hoặc tắt `java.autobuild.enabled` trong lúc chạy `mvn`, rồi chạy `mvn -B clean package` |
+| Test đo thời gian fail khi sandbox đang chạy | Docker Desktop thiếu tài nguyên | Dùng `scripts\run-tests.ps1` |
+| `dependency failed to start: container ...-rabbitmq-1 exited (1)`, log có `.erlang.cookie: eacces` | Container RabbitMQ cũ bị lỗi quyền file khi khởi động lại | `docker compose up -d --force-recreate --wait rabbitmq` (RabbitMQ không có volume, không mất dữ liệu) |
+| `docker compose up --build` báo `failed to solve ... exit code: 1` | Build Maven trong Docker lỗi | Xem các dòng `[ERROR]` ngay phía trên thông báo đó (build không còn chạy ở chế độ `-q`), hoặc chạy `mvn -B -ntp -T 1C package -DskipTests` trên máy để thấy lỗi nhanh hơn |
+| PowerShell hiện `Pattern[0]:` | Lệnh dài bị ngắt dòng khi dán | Bấm `Ctrl+C` rồi dán lại cả dòng |
 
 ---
 
