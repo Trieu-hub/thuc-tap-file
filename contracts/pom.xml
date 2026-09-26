@@ -47,13 +47,8 @@
                         </plugin>
                     </plugins>
                 </configuration>
-                <executions>
-                    <execution>
-                        <goals>
-                            <goal>generate</goal>
-                        </goals>
-                    </execution>
-                </executions>
+                <!-- No <executions>: spring-boot-starter-parent already binds the "generate" execution;
+                     declaring another one ran protoc twice. -->
             </plugin>
         </plugins>
     </build>
