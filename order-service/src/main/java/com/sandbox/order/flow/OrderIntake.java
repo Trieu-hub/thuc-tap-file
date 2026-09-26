@@ -14,6 +14,7 @@ import org.slf4j.MDC;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Component;
 
+import com.sandbox.order.cache.IdempotencyStore;
 import com.sandbox.order.order.NewOrder;
 import com.sandbox.order.order.OrderMode;
 import com.sandbox.order.order.OrderRepository;
@@ -26,6 +27,9 @@ import com.sandbox.order.order.TimelineStep;
  * for a repeated partner_order_id (D4), otherwise generate the identifiers and insert the order as
  * CREATED, answering 409 when an identical request won the insert (D11). Kept in one place so the
  * two flows cannot drift apart on idempotency.
+ * <p>
+ * Two lines of defence: the Redis key {@code idempotency:order:{partner_order_id}} (spec V.1), then
+ * MySQL's {@code UNIQUE(partner_order_id)}, which alone still works when Redis is down (D12).
  */
 @Component
 class OrderIntake {
@@ -36,16 +40,32 @@ class OrderIntake {
 
 	private final OrderRepository orders;
 
-	OrderIntake(OrderRepository orders) {
+	private final IdempotencyStore idempotency;
+
+	OrderIntake(OrderRepository orders, IdempotencyStore idempotency) {
 		this.orders = orders;
+		this.idempotency = idempotency;
 	}
 
-	/** The stored order as an idempotent replay, or empty when this partner_order_id is new. */
+	/**
+	 * The stored order as an idempotent replay, or empty when this partner_order_id is new.
+	 * @throws OrderConflictException when the key is claimed but its order is not written yet (D11)
+	 */
 	Optional<OrderResult> replay(String partnerOrderId, long startNanos) {
-		return this.orders.findByPartnerOrderId(partnerOrderId).map((order) -> replay(order, startNanos));
+		Optional<String> knownOrderId = this.idempotency.find(partnerOrderId);
+		if (knownOrderId.isPresent()) {
+			Optional<OrderView> order = this.orders.findById(knownOrderId.get());
+			if (order.isEmpty()) {
+				// Claimed by an identical request whose order row is not committed yet.
+				throw conflict(partnerOrderId);
+			}
+			return Optional.of(replay(order.get(), "REDIS", startNanos));
+		}
+		// No key: a new partner_order_id, a key older than 24 h, or Redis down. MySQL decides.
+		return this.orders.findByPartnerOrderId(partnerOrderId).map((order) -> replay(order, "MYSQL", startNanos));
 	}
 
-	private OrderResult replay(OrderView order, long startNanos) {
+	private OrderResult replay(OrderView order, String foundIn, long startNanos) {
 		MDC.put("correlation_id", order.correlationId());
 		try {
 			log.atInfo()
@@ -53,6 +73,7 @@ class OrderIntake {
 				.addKeyValue("action", "idempotent_replay")
 				.addKeyValue("order_id", order.orderId())
 				.addKeyValue("status", order.status().name())
+				.addKeyValue("idempotency_source", foundIn)
 				.addKeyValue("execution_time_ms", elapsedMs(startNanos))
 				.log("Duplicate partner_order_id, returning the stored order");
 			return new OrderResult(order, true);
@@ -67,21 +88,47 @@ class OrderIntake {
 				command.amount(), mode, UUID.randomUUID().toString(), "TXN-" + command.partnerOrderId());
 	}
 
-	/** Inserts the order as CREATED with its first timeline step. */
+	/**
+	 * Claims the idempotency key, then inserts the order as CREATED with its first timeline step.
+	 * @throws OrderConflictException when an identical request claimed or inserted first (D11)
+	 */
 	void insert(NewOrder order, long startNanos) {
+		IdempotencyStore.Claim claim = this.idempotency.claim(order.partnerOrderId(), order.orderId());
+		if (claim == IdempotencyStore.Claim.TAKEN) {
+			throw conflict(order.partnerOrderId());
+		}
 		try {
 			this.orders.insertCreated(order, new TimelineEntry(TimelineStep.ORDER_CREATED, "order-service", "HTTP",
 					"SUCCESS", elapsedMs(startNanos), null));
 		}
 		catch (DuplicateKeyException ex) {
-			// The lookup found nothing, so an identical request inserted in between (D11).
-			log.atInfo()
-				.addKeyValue("transport", "HTTP")
-				.addKeyValue("action", "concurrent_duplicate_rejected")
-				.addKeyValue("partner_order_id", order.partnerOrderId())
-				.log("Identical request is already being processed");
-			throw new OrderConflictException(order.partnerOrderId());
+			// UNIQUE(partner_order_id): an identical request inserted in between without the key (D11, D12).
+			release(order, claim);
+			throw conflict(order.partnerOrderId());
 		}
+		catch (RuntimeException ex) {
+			release(order, claim);
+			throw ex;
+		}
+		if (claim == IdempotencyStore.Claim.CLAIMED) {
+			this.idempotency.confirm(order.partnerOrderId());
+		}
+	}
+
+	private void release(NewOrder order, IdempotencyStore.Claim claim) {
+		if (claim == IdempotencyStore.Claim.CLAIMED) {
+			this.idempotency.release(order.partnerOrderId(), order.orderId());
+		}
+	}
+
+	private static OrderConflictException conflict(String partnerOrderId) {
+		log.atInfo()
+			.addKeyValue("transport", "HTTP")
+			.addKeyValue("action", "concurrent_duplicate_rejected")
+			.addKeyValue("partner_order_id", partnerOrderId)
+			.addKeyValue("status", "CONFLICT")
+			.log("Identical request is already being processed");
+		return new OrderConflictException(partnerOrderId);
 	}
 
 	/**
