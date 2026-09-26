@@ -34,4 +34,19 @@ class SandboxJsonLogFormatterTests {
 				"\"cache_hit\":false", "\"message\":\"payment recorded\"", "\"timestamp\":\"");
 	}
 
+	@Test
+	void keyValuePairOverridesTheSameMdcKeyInsteadOfRepeatingIt() {
+		LoggingEvent event = new LoggingEvent("fqcn", new LoggerContext().getLogger("test"), Level.INFO,
+				"reply received", null, null);
+		// The adapter put transport=HTTP in the MDC; this log line is about a RabbitMQ reply.
+		event.setMDCPropertyMap(Map.of("transport", "HTTP", "correlation_id", "corr-123"));
+		event.addKeyValuePair(new KeyValuePair("transport", "RabbitMQ"));
+
+		String json = this.formatter.format(event);
+
+		assertThat(json).contains("\"transport\":\"RabbitMQ\"", "\"correlation_id\":\"corr-123\"")
+			.doesNotContain("\"transport\":\"HTTP\"");
+		assertThat(json.split("\"transport\"", -1)).as("one transport key").hasSize(2);
+	}
+
 }

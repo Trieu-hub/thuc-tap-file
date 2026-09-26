@@ -4,9 +4,82 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Insurance Sandbox</title>
+    <link rel="stylesheet" href="style.css">
 </head>
 <body>
+<header>
     <h1>Insurance Sandbox</h1>
-    <p>Placeholder Ngày 1. Form tạo đơn, timeline, Correlation ID và Cache Status sẽ làm ở Ngày 4.</p>
+    <p>Tạo đơn → Thanh toán → Phát hành e-GCN → Thông báo, qua RabbitMQ RPC hoặc gRPC + Kafka</p>
+</header>
+
+<main>
+    <section class="card" aria-labelledby="form-title">
+        <h2 id="form-title">Tạo đơn bảo hiểm</h2>
+        <form id="order-form" novalidate>
+            <label>Mã đơn đối tác (<code>partner_order_id</code>)
+                <input name="partner_order_id" required maxlength="64">
+            </label>
+            <label>Tên khách hàng
+                <input name="customer_name" required maxlength="255" value="Nguyễn Văn A">
+            </label>
+            <label>Số điện thoại
+                <input name="phone" required value="0901234567">
+            </label>
+            <label>Số tiền thanh toán (VND)
+                <input name="amount" type="number" min="1" step="1" required value="500000">
+            </label>
+            <fieldset>
+                <legend>Chế độ chạy</legend>
+                <label class="radio"><input type="radio" name="mode" value="RABBITMQ_RPC" checked> Luồng 1: RabbitMQ RPC</label>
+                <label class="radio"><input type="radio" name="mode" value="GRPC_KAFKA"> Luồng 2: gRPC + Kafka</label>
+            </fieldset>
+            <div class="buttons">
+                <button type="submit" id="submit">Tạo Đơn &amp; Phát Hành</button>
+                <button type="button" id="resend" class="secondary" disabled>Gửi lại Request trùng</button>
+            </div>
+            <p class="hint">Mỗi lần tạo đơn mới, mã đơn đối tác được sinh lại. "Gửi lại Request trùng" gửi đúng body của lần trước.</p>
+        </form>
+        <ul id="form-errors" class="errors" hidden></ul>
+    </section>
+
+    <section class="card" aria-labelledby="result-title">
+        <h2 id="result-title">Kết quả</h2>
+        <p id="empty" class="muted">Chưa có đơn. Tạo đơn ở bên trái hoặc chọn một đơn gần đây.</p>
+        <div id="result" hidden>
+            <div class="row">
+                <span id="http" class="pill"></span>
+                <span id="replay" class="pill warn" hidden>Request trùng, trả về kết quả cũ</span>
+                <span id="polling" class="pill info" hidden></span>
+            </div>
+            <dl class="facts">
+                <dt>Order ID</dt><dd id="order-id"></dd>
+                <dt>Khách hàng</dt><dd id="customer"></dd>
+                <dt>Trạng thái</dt><dd><span id="status" class="status"></span> <span id="failure" class="muted"></span></dd>
+                <dt>Số hợp đồng</dt><dd id="policy-number"></dd>
+                <dt>Correlation ID</dt>
+                <dd><code id="correlation-id"></code> <button type="button" id="copy-cid" class="link">Copy</button></dd>
+                <dt>Cache Status</dt>
+                <dd><span id="cache-status" class="pill"></span> <button type="button" id="reload" class="link">Tải lại (GET)</button></dd>
+            </dl>
+            <ol id="timeline" class="timeline"></ol>
+            <details>
+                <summary>Truy vết log của đơn này qua 3 service</summary>
+                <p class="muted">Chạy trong PowerShell tại thư mục dự án:</p>
+                <pre id="log-command"></pre>
+                <button type="button" id="copy-log" class="link">Copy lệnh</button>
+            </details>
+        </div>
+    </section>
+
+    <section class="card wide" aria-labelledby="recent-title">
+        <h2 id="recent-title">Đơn gần đây <button type="button" id="refresh-list" class="link">Làm mới</button></h2>
+        <table>
+            <thead><tr><th>Order ID</th><th>Đối tác</th><th>Luồng</th><th>Trạng thái</th><th>Tạo lúc</th></tr></thead>
+            <tbody id="recent"></tbody>
+        </table>
+    </section>
+</main>
+
+<script src="app.js"></script>
 </body>
 </html>

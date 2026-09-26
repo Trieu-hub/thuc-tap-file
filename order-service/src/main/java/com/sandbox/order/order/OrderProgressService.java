@@ -7,6 +7,7 @@ import java.util.List;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
@@ -37,9 +38,12 @@ public class OrderProgressService {
 
 	private final ConsumerInbox inbox;
 
-	public OrderProgressService(JdbcTemplate jdbc, ConsumerInbox inbox) {
+	private final ApplicationEventPublisher events;
+
+	public OrderProgressService(JdbcTemplate jdbc, ConsumerInbox inbox, ApplicationEventPublisher events) {
 		this.jdbc = jdbc;
 		this.inbox = inbox;
+		this.events = events;
 	}
 
 	@Transactional
@@ -57,6 +61,7 @@ public class OrderProgressService {
 		if (eventId != null && !this.inbox.tryClaim(eventId, POLICY_ISSUED_EVENT)) {
 			log.atInfo()
 				.addKeyValue("action", "duplicate_event_ignored")
+				.addKeyValue("status", "IGNORED")
 				.addKeyValue("event_id", eventId)
 				.addKeyValue("order_id", orderId)
 				.log("Event already processed, order left unchanged");
@@ -75,6 +80,8 @@ public class OrderProgressService {
 	public void recordStep(String orderId, TimelineEntry entry) {
 		lockOrder(orderId);
 		appendStepOnce(orderId, entry);
+		// Delivered after commit: the read cache drops its copy (D1).
+		this.events.publishEvent(new OrderChangedEvent(orderId));
 	}
 
 	private TransitionResult transition(String orderId, OrderStatus target, TimelineEntry entry, String policyNumber,
@@ -96,6 +103,8 @@ public class OrderProgressService {
 				.log("Order already past this status, status left unchanged");
 		}
 		appendStepOnce(orderId, entry);
+		// Also when the status did not move: the timeline may have gained a step (e.g. a late PAYMENT).
+		this.events.publishEvent(new OrderChangedEvent(orderId));
 		return new TransitionResult(applied ? target : current,
 				applied ? TransitionResult.Outcome.APPLIED : TransitionResult.Outcome.IGNORED);
 	}
@@ -133,6 +142,7 @@ public class OrderProgressService {
 		catch (DuplicateKeyException ex) {
 			log.atInfo()
 				.addKeyValue("action", "duplicate_timeline_step_ignored")
+				.addKeyValue("status", "IGNORED")
 				.addKeyValue("order_id", orderId)
 				.addKeyValue("step", entry.step().name())
 				.log("Timeline step already recorded");

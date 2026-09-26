@@ -60,6 +60,7 @@ class RpcWarmUp {
 				status.setRollbackOnly();
 			});
 			log.atInfo()
+				.addKeyValue("transport", "RabbitMQ")
 				.addKeyValue("action", "warm_up")
 				.addKeyValue("status", "SUCCESS")
 				.addKeyValue("execution_time_ms", elapsedMs(start))
@@ -68,6 +69,7 @@ class RpcWarmUp {
 		catch (RuntimeException ex) {
 			// A failed warm-up must not stop the service: the first real request is only slower.
 			log.atWarn()
+				.addKeyValue("transport", "RabbitMQ")
 				.addKeyValue("action", "warm_up")
 				.addKeyValue("status", "FAILED")
 				.addKeyValue("execution_time_ms", elapsedMs(start))

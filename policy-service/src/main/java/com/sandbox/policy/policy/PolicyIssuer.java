@@ -53,6 +53,7 @@ public class PolicyIssuer {
 		if (command.eventId() != null && !this.inbox.tryClaim(command.eventId(), PAYMENT_RECORDED_EVENT)) {
 			log.atInfo()
 				.addKeyValue("action", "duplicate_event_ignored")
+				.addKeyValue("status", "IGNORED")
 				.addKeyValue("event_id", command.eventId())
 				.addKeyValue("order_id", command.orderId())
 				.log("Event already processed, no new policy issued");
@@ -75,6 +76,7 @@ public class PolicyIssuer {
 					// uk_policies_order_id: this order already has its policy.
 					log.atInfo()
 						.addKeyValue("action", "duplicate_policy_ignored")
+						.addKeyValue("status", "IGNORED")
 						.addKeyValue("order_id", command.orderId())
 						.log("Order already has a policy, returning it");
 					return existingPolicy(command.orderId(), IssuePolicyResult.Outcome.ALREADY_ISSUED);
@@ -82,6 +84,7 @@ public class PolicyIssuer {
 				// Only the random number collided: must not be mistaken for "already issued".
 				log.atWarn()
 					.addKeyValue("action", "policy_number_collision")
+					.addKeyValue("status", "RETRY")
 					.addKeyValue("order_id", command.orderId())
 					.addKeyValue("attempt", attempt)
 					.log("Generated policy number already exists, retrying");

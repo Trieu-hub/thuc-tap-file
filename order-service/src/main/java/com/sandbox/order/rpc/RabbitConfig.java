@@ -46,6 +46,7 @@ class RabbitConfig {
 				log.atWarn()
 					.addKeyValue("transport", "RabbitMQ")
 					.addKeyValue("action", "late_reply_ignored")
+					.addKeyValue("status", "IGNORED")
 					.log("RPC reply arrived after the timeout and was discarded");
 			}
 			finally {

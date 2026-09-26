@@ -34,6 +34,7 @@ class PaymentRpcListener {
 			@Header(name = RabbitConfig.CORRELATION_HEADER, required = false) String correlationId) {
 		// The listener thread is shared by all messages, so the MDC must be set and cleared per message (F30).
 		MDC.put("correlation_id", correlationId);
+		MDC.put("transport", "RabbitMQ");
 		long start = System.nanoTime();
 		try {
 			RecordPaymentResult result = this.recorder.record(request.toCommand());
@@ -64,6 +65,7 @@ class PaymentRpcListener {
 		}
 		finally {
 			MDC.remove("correlation_id");
+			MDC.remove("transport");
 		}
 	}
 

@@ -1,6 +1,7 @@
 package com.sandbox.policy.observability;
 
 import java.time.temporal.ChronoUnit;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 import ch.qos.logback.classic.spi.ILoggingEvent;
@@ -32,10 +33,9 @@ public class SandboxJsonLogFormatter implements StructuredLogFormatter<ILoggingE
 			members.add("log_level", (event) -> event.getLevel().toString());
 			members.add("logger", ILoggingEvent::getLoggerName);
 			members.add("message", ILoggingEvent::getFormattedMessage);
-			members.from(ILoggingEvent::getMDCPropertyMap).whenNotEmpty().usingPairs(Map::forEach);
-			members.from(ILoggingEvent::getKeyValuePairs)
-				.whenNotEmpty()
-				.usingExtractedPairs(Iterable::forEach, (KeyValuePair pair) -> pair.key, (KeyValuePair pair) -> pair.value);
+			// One map, key-value pairs over MDC: an adapter puts "transport" in the MDC and a log line may
+			// set it again; writing both would repeat the key, which ConvertFrom-Json (PowerShell) rejects.
+			members.from(SandboxJsonLogFormatter::fields).whenNotEmpty().usingPairs(Map::forEach);
 			members.add("exception", ILoggingEvent::getThrowableProxy)
 				.whenNotNull()
 				.as(ThrowableProxyUtil::asString);
@@ -45,6 +45,16 @@ public class SandboxJsonLogFormatter implements StructuredLogFormatter<ILoggingE
 	@Override
 	public String format(ILoggingEvent event) {
 		return this.writer.writeToString(event);
+	}
+
+	private static Map<String, Object> fields(ILoggingEvent event) {
+		Map<String, Object> fields = new LinkedHashMap<>(event.getMDCPropertyMap());
+		if (event.getKeyValuePairs() != null) {
+			for (KeyValuePair pair : event.getKeyValuePairs()) {
+				fields.put(pair.key, pair.value);
+			}
+		}
+		return fields;
 	}
 
 }

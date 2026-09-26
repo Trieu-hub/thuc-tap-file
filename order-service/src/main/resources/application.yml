@@ -26,6 +26,13 @@ spring:
         payment:
           # Local run; docker-compose.yml overrides it with static://payment-service:9090.
           target: static://localhost:9090
+  data:
+    redis:
+      host: localhost                    # compose sets redis
+      port: 6379
+      # A few hundred ms: with Redis down a request falls back to MySQL instead of hanging (D12).
+      timeout: 300ms
+      connect-timeout: 300ms
   kafka:
     bootstrap-servers: localhost:9094   # host listener (F25); compose sets kafka:9092
     producer:
@@ -61,8 +68,17 @@ management:
       probes:
         # /actuator/health/readiness stays OUT_OF_SERVICE until GrpcWarmUp has run (compose healthcheck)
         enabled: true
+  health:
+    redis:
+      # Redis is an optimisation (idempotency key, read cache), not a dependency: with Redis down the
+      # service keeps serving from MySQL (D12), so it must not report DOWN or fail its healthcheck.
+      enabled: false
 
 logging:
+  level:
+    # The Kafka client logs its whole configuration (dozens of lines) at INFO on every start,
+    # which buries the lines a demo greps for; warnings and errors are kept.
+    org.apache.kafka: WARN
   structured:
     format:
       console: com.sandbox.order.observability.SandboxJsonLogFormatter
