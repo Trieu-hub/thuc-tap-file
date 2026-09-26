@@ -12,6 +12,7 @@ import org.springframework.http.MediaType;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 
+import com.sandbox.order.cache.OrderReadCache;
 import com.sandbox.order.flow.GrpcKafkaOrderFlow;
 import com.sandbox.order.flow.OrderResult;
 import com.sandbox.order.flow.RabbitRpcOrderFlow;
@@ -45,6 +46,9 @@ class OrderControllerValidationTests {
 
 	@MockitoBean
 	private OrderRepository orders;
+
+	@MockitoBean
+	private OrderReadCache cache;
 
 	@Test
 	void invalidFieldsAreListedInSnakeCase() throws Exception {
@@ -106,7 +110,7 @@ class OrderControllerValidationTests {
 
 	@Test
 	void unknownOrderIsNotFound() throws Exception {
-		given(this.orders.findById(any())).willReturn(Optional.empty());
+		given(this.cache.read(any())).willReturn(Optional.empty());
 
 		this.mockMvc.perform(get("/api/v1/orders/ORD-404"))
 			.andExpect(status().isNotFound())
