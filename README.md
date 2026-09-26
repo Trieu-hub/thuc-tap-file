@@ -30,7 +30,11 @@ Kèm theo: Redis (idempotency và cache), log JSON có `correlation_id` xuyên s
   - Chống trùng khi consume: `consumer_inbox` theo `event_id` (Policy và Order) và `UNIQUE(order_id)` trên bảng hợp đồng. Event gửi lại không sinh hợp đồng thứ hai, log `duplicate_event_ignored`.
   - Offset chỉ được commit sau khi transaction DB đã commit. Event lỗi được thử lại 3 lần rồi vào `<topic>.DLT`; event không đọc được thì vào DLT ngay.
   - `correlation_id` đi qua metadata gRPC `x-correlation-id` và trường `correlation_id` của envelope Kafka.
-- **Chưa làm:** Redis (idempotency và cache), Web UI (Ngày 4).
+- **Ngày 4 đã xong: Web UI, Redis, log chuẩn hóa:**
+  - Web UI tại http://localhost:3000: form tạo đơn, chọn luồng, timeline 4 bước, Correlation ID, Cache Status, nút gửi lại request trùng, polling cho Luồng 2 (xem [Demo trên Web UI](#demo-trên-web-ui)).
+  - Redis: key chống trùng `idempotency:order:{partner_order_id}` (24 giờ) và cache đọc `order:{order_id}` (10 phút). Redis chết thì hệ thống vẫn chạy bằng MySQL.
+  - Log JSON của cả 3 service có `transport` ở mọi dòng, log `GET` có `cache_hit`, và một lệnh là truy vết được một đơn qua 3 service.
+- **Chưa làm:** kiểm thử các kịch bản ngoại lệ trên UI, hoàn thiện README và tập dượt demo (Ngày 5).
 
 Chi tiết tiến độ xem [`current-state.md`](current-state.md).
 
@@ -59,7 +63,7 @@ Kafka UI (tùy chọn): `docker compose --profile tools up -d kafka-ui`.
 
 | Thành phần | URL / cổng |
 |---|---|
-| Web UI | http://localhost:3000 (hiện là trang placeholder, UI thật làm ở Ngày 4) |
+| Web UI | http://localhost:3000 |
 | Order Service | http://localhost:8080 (health: `/actuator/health`) |
 | Payment Service | http://localhost:8081, gRPC `:9090` (`PaymentService.RecordPayment`) |
 | Policy Service | http://localhost:8082 |
@@ -98,12 +102,58 @@ Dùng `scripts\run-tests.ps1` thay cho `mvn -B package`:
 
 ---
 
+## Demo trên Web UI
+
+Mở http://localhost:3000 sau khi chạy `docker compose up -d --wait`. Ảnh dưới đây chụp ngày 2026-09-26 trên sandbox đang chạy.
+
+**1. Luồng 2: `202 Accepted`, UI polling.** Payment đã ghi nhận qua gRPC; 2 bước sau đang chờ Kafka:
+
+![Luồng 2 vừa nhận 202, đang polling](docs/images/01-flow2-202-polling.jpg)
+
+**2. Polling xong: `ISSUED`, đủ 4 bước, `CACHE MISS (DB)`.** Lần GET đầu đọc MySQL:
+
+![Luồng 2 đã ISSUED, cache miss](docs/images/02-flow2-issued-cache-miss.jpg)
+
+**3. Bấm F5: `CACHE HIT (REDIS)`.** URL giữ `#order=...`, nên trang đọc lại đúng đơn đó, lần này từ Redis:
+
+![Refresh: cache hit](docs/images/03-refresh-cache-hit.jpg)
+
+**4. [Gửi lại Request trùng]:** `200 OK`, nhãn "Request trùng, trả về kết quả cũ", cùng `order_id`, không tạo đơn mới (key `idempotency:order:{partner_order_id}`):
+
+![Request trùng](docs/images/04-duplicate-request.jpg)
+
+**5. Payment tắt (`docker compose stop payment-service`), Luồng 2:** `200`, `PROCESSING_FAILED`, bước thất bại ghi rõ mã gRPC gốc:
+
+![Payment tắt](docs/images/05-payment-down-failed.jpg)
+
+**Truy vết một đơn qua 3 service:** mở mục "Truy vết log của đơn này qua 3 service" trên UI để lấy lệnh PowerShell có sẵn `correlation_id`. Ví dụ đầu ra thật (đơn Luồng 2, sau khi dừng rồi bật lại payment-service):
+
+```text
+timestamp                service         transport  action                 status           execution_time_ms
+2026-09-26T15:08:35.048Z payment-service gRPC       RecordPayment          RECORDED                        37
+2026-09-26T15:08:35.064Z order-service   gRPC       RecordPayment          RECORDED                       112
+2026-09-26T15:08:35.115Z order-service   HTTP       CreateOrder            PAYMENT_RECORDED               272
+2026-09-26T15:08:35.217Z order-service   HTTP       GetOrder               PAYMENT_RECORDED                26
+2026-09-26T15:08:35.745Z payment-service Kafka      PublishPaymentRecorded SUCCESS                        690
+2026-09-26T15:08:35.760Z policy-service  Kafka      IssuePolicy            ISSUED                          32
+2026-09-26T15:08:35.775Z policy-service  Kafka      PublishPolicyIssued    SUCCESS                         14
+2026-09-26T15:08:35.836Z order-service   IN_PROCESS SendNotification       SUCCESS                          0
+2026-09-26T15:08:35.836Z order-service   Kafka      ApplyPolicyIssued      ISSUED                          38
+2026-09-26T15:08:36.284Z order-service   HTTP       GetOrder               ISSUED                           8
+```
+
+**Redis được dùng ở đâu** (câu nghiệm thu số 5):
+- **Lúc tạo đơn:** key `idempotency:order:{partner_order_id}` (value là `order_id`, TTL 24 giờ) để trả lại kết quả cũ khi request trùng.
+- **Lúc xem đơn:** `GET /api/v1/orders/{id}` đọc `order:{order_id}` (TTL 10 phút) trước khi đọc MySQL.
+
+Xem key trong Redis: `docker compose exec redis redis-cli --scan --pattern '*'` và `docker compose exec redis redis-cli TTL order:<ORDER_ID>`.
+
 ## API (Order Service)
 
 | Method | Path | Kết quả |
 |---|---|---|
 | `POST` | `/api/v1/orders` | Tạo đơn và chạy Luồng 1 hoặc Luồng 2 theo `mode`. Xem bảng mã trả về bên dưới |
-| `GET` | `/api/v1/orders/{id}` | Chi tiết đơn và timeline, đọc thẳng DB; `404` nếu không có. `cache_status` có từ Ngày 4 (Redis) |
+| `GET` | `/api/v1/orders/{id}` | Chi tiết đơn và timeline. Đọc Redis trước, MySQL khi không có trong cache; `cache_status` là `CACHE_HIT_REDIS` hoặc `CACHE_MISS_DB`; header `X-Correlation-Id`. `404` nếu không có |
 | `GET` | `/api/v1/orders` | 100 đơn mới nhất, mới nhất trước (không kèm timeline) |
 
 Body của `POST` (JSON dùng snake_case, `amount` là số nguyên VND):
@@ -287,6 +337,7 @@ Web UI (nginx :3000) ──/api──► Order Service :8080 ──┬── Lu�
                                     └── MySQL (order_db | payment_db | policy_db, mỗi service một schema)
 ```
 
+- **Quyết định thiết kế D1–D20** (bản đầy đủ, tiếng Anh): [`docs/design-decisions.md`](docs/design-decisions.md)
 - **Sơ đồ sequence chi tiết** (gồm cả nhánh lỗi: timeout, trùng request, gửi lại event, DLQ): [`docs/sequence-diagrams.md`](docs/sequence-diagrams.md)
 - **Các trường hợp xấu và cách xử lý (F1–F32), khung service:** [`docs/implementation-plan.md`](docs/implementation-plan.md)
 - **Hợp đồng:** [`contracts/payment.proto`](contracts/payment.proto) (gRPC); JSON Schemas trong [`contracts/schemas/`](contracts/schemas): message RabbitMQ (`*-rpc-*.schema.json`), envelope Kafka (`event-envelope.schema.json`) và hai event `payment-recorded.schema.json`, `policy-issued.schema.json`.
@@ -298,19 +349,19 @@ contracts/          payment.proto + Maven module sinh gRPC stub (dùng chung cho
 order-service/      REST API, điều phối 2 luồng
 payment-service/    ghi nhận thanh toán (RabbitMQ RPC + gRPC server)
 policy-service/     phát hành hợp đồng (RabbitMQ RPC + Kafka consumer)
-ui/                 HTML/JS tĩnh + nginx.conf (proxy /api)
+ui/                 HTML/JS tĩnh (index.html, app.js, style.css) + nginx.conf (proxy /api)
 docker/             service.Dockerfile dùng chung + mysql/init.sql
-docs/               sơ đồ sequence, kế hoạch triển khai
-current-state.md    tiến độ theo ngày
+docs/               quyết định thiết kế, sơ đồ sequence, kế hoạch triển khai, ảnh chụp UI (docs/images)
+scripts/            run-tests.ps1
 ```
 
 ---
 
 ## Quyết định thiết kế chính
 
-Đề bài có một số điểm mâu thuẫn hoặc để ngỏ. Các quyết định dưới đây là có chủ đích. Ghi chú nội bộ (`CLAUDE.md`, `docs/`) không nằm trong repo, nên mọi quyết định ảnh hưởng tới hành vi hệ thống đều được ghi đầy đủ ở đây.
+Đề bài có một số điểm mâu thuẫn hoặc để ngỏ. Các quyết định dưới đây là có chủ đích; bản đầy đủ D1–D20 nằm ở [`docs/design-decisions.md`](docs/design-decisions.md).
 
-- **Cache-aside, xóa key khi trạng thái đổi (D1):** để lần xem đầu hiện `CACHE MISS (DB)` và lần refresh hiện `CACHE HIT (REDIS)`, đúng yêu cầu demo.
+- **Cache-aside, xóa key khi trạng thái đổi (D1):** để lần xem đầu hiện `CACHE MISS (DB)` và lần refresh hiện `CACHE HIT (REDIS)`, đúng yêu cầu demo. Chi tiết ở mục Ngày 4 bên dưới.
 - **`partner_transaction_id = TXN-{partner_order_id}` (D2):** chống gạch nợ trùng thêm một lớp ở Payment.
 - **Request trùng trả `200` kèm kết quả cũ (D4); request trùng đến đồng thời trả `409` (D11).**
 - **Chống trùng khi consume Kafka bằng `consumer_inbox` và `UNIQUE(order_id)` (D10):** Kafka gửi lại event cũng không sinh hợp đồng thứ hai.
@@ -334,9 +385,21 @@ current-state.md    tiến độ theo ngày
 - **Warm-up gRPC ở payment-service (`GrpcServerWarmUp`):** warm-up của Order chỉ chạy khi order-service khởi động. Nếu **chỉ payment-service khởi động lại** (ví dụ lúc demo "tắt payment rồi bật lại"), phía server vẫn nguội: lần `RecordPayment` đầu tiên mất 1746 ms và đơn bị `PAYMENT_TIMEOUT`, trong khi Payment vẫn gạch nợ. Vì vậy, ngay khi server gRPC bắt đầu lắng nghe, payment-service tự gọi `RecordPayment` vào chính nó qua kết nối cục bộ thật, với `amount = 0`. `PaymentRecorder` từ chối request này trước khi chạm DB, và kết quả `REJECTED` không bao giờ được publish, nên không có gì được lưu hay gửi đi. Đo lại khi chỉ khởi động lại payment-service: bước `PAYMENT` của đơn đầu tiên 135 ms; sau khi tắt rồi bật lại, 49 ms.
 - **Không dùng header `__TypeId__`:** value là chuỗi JSON do `JsonMapper` của Spring Boot ghi (snake_case), bên nhận tự biết kiểu dữ liệu của topic mình đọc. Hai service không phụ thuộc tên class Java của nhau.
 
+### Redis, log và UI, chốt ở Ngày 4
+
+- **Thay bước "Set/Update Cache" trong sơ đồ của đề bằng việc xóa key:** sơ đồ Luồng 1 ghi *"Set Cache order:{order_id}"* sau khi phát hành, sơ đồ Luồng 2 ghi *"Update Cache"* khi nhận `policy.issued`. Làm như vậy thì lần GET đầu tiên đã là HIT, trong khi mục IV.3 yêu cầu lần load đầu phải thấy `CACHE MISS (DB)`. Vì vậy chỉ `GET` mới ghi cache (khi không có trong cache), còn mọi lần đổi trạng thái thì **xóa** `order:{order_id}` sau khi transaction commit.
+- **Chỉ cache đơn đã xong hẳn:** `ISSUED` và đã có bước `NOTIFICATION`. `PROCESSING_FAILED` chưa phải trạng thái cuối, vì đơn có thể chuyển sang `ISSUED` khi `policy.issued` về muộn. Bước thông báo là một transaction riêng, chạy sau `ISSUED`. Nếu cache sớm, một lần GET chen vào đúng lúc có thay đổi có thể giữ bản cũ suốt 10 phút. Dù vậy `GET` vẫn luôn hỏi Redis trước (mục V.1).
+- **Key chống trùng có 2 giai đoạn:** `SET NX` với TTL 30 giây trước khi ghi đơn, rồi gia hạn lên 24 giờ khi đơn đã commit; nếu ghi thất bại thì trả key lại. Key có mà đơn chưa có nghĩa là một request giống hệt đang chạy, trả `409` (D11). Nếu service sập giữa 2 bước, `partner_order_id` chỉ bị khóa 30 giây chứ không phải 24 giờ.
+- **Redis chết thì không kéo hệ thống chết theo (D12):** timeout 300 ms, log `redis_unavailable`, chống trùng dựa vào `UNIQUE(partner_order_id)` của MySQL, GET đọc MySQL. Redis không nằm trong `/actuator/health`, nên healthcheck vẫn `UP`.
+- **Log:** mọi điểm vào (filter HTTP, listener RabbitMQ và Kafka, interceptor gRPC) đặt `transport` vào MDC và xóa trong `finally`. Log của các class nghiệp vụ dùng chung vì vậy cũng có `transport`. Filter HTTP chỉ đặt `transport`; `correlation_id` của GET được đặt sau khi đã đọc được đơn. Nếu một dòng log tự ghi `transport`, giá trị đó thắng và key không bị lặp (JSON có key trùng thì `ConvertFrom-Json` báo lỗi). Log đánh dấu (`duplicate_*_ignored`…) có `status` nhưng không có `execution_time_ms`, vì không có thao tác nào được đo. Log của Kafka client hạ xuống `WARN`.
+- **UI:** nhãn cache luôn lấy từ response của `GET` (sau khi POST, UI gọi GET 1 lần); dữ liệu hiển thị bằng `textContent`, không dùng `innerHTML` (tên khách hàng chứa HTML chỉ hiện ra dạng chữ); "Log" trong kết quả Ngày 4 của đề được hiểu là UI đưa sẵn lệnh truy vết log theo `correlation_id`, không dựng hạ tầng gom log.
+
 ### Giới hạn đã biết (nói rõ khi demo)
 
 - Payment có thể đã gạch nợ trong khi đơn bị timeout (cả hai luồng).
 - **Dual write ở Payment:** "commit DB rồi mới publish `payment.recorded`" không nguyên tử. Kafka chết đúng lúc đó thì event mất, đơn kẹt ở `PAYMENT_RECORDED`. Policy cũng ghi DB rồi mới publish `policy.issued`, nhưng trường hợp này đã có retry kèm publish lại. Cách làm đúng trong production là **Transactional Outbox**: ghi event vào bảng outbox trong cùng transaction, rồi một tiến trình khác đẩy lên Kafka. Bài này không làm Outbox.
 - **Event có thể về không theo thứ tự so với luồng gRPC:** `policy.issued` có thể tới Order trước khi Order ghi xong `PAYMENT_RECORDED`. Trạng thái chỉ đi tiến nên đơn vẫn là `ISSUED`, nhưng bước `PAYMENT` có thể nằm sau `POLICY_ISSUANCE` trong timeline. Giữa các event của cùng một đơn thì thứ tự được giữ, vì key là `order_id` nên chúng nằm cùng partition.
 - Không có job quét đơn treo: đơn kẹt ở `PAYMENT_RECORDED` (vì mất event) chỉ được phát hiện qua log `event_publish_failed`.
+- **Tắt payment-service có thể ra `PAYMENT_SERVICE_UNAVAILABLE` (khoảng 0,4 s) hoặc `PAYMENT_TIMEOUT` (3 s)**, tùy trạng thái kết nối gRPC lúc đó. Kết nối bị từ chối ngay thì báo `UNAVAILABLE`; kết nối cũ tới container đã dừng thì gói tin bị bỏ lặng lẽ và phải chờ hết deadline. Cả hai trường hợp đều không treo HTTP.
+- Cache-aside vẫn còn một khe nhỏ: một GET đọc MySQL ngay trước khi đơn đã xong hẳn nhận thêm một bước về muộn (ví dụ `PAYMENT` đến sau `ISSUED`), rồi ghi cache sau khi key đã bị xóa. Khi đó cache giữ bản thiếu bước đó tối đa 10 phút.
+- RabbitMQ đôi khi không khởi động được sau một lần build nặng (`.erlang.cookie: eacces`, đã gặp 2 lần, chưa tái hiện được có chủ đích). Cách xử lý nằm trong bảng sự cố ở phần "Chạy dự án".
