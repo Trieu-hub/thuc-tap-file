@@ -54,6 +54,7 @@ class KafkaConfig {
 			log.atError()
 				.addKeyValue("transport", "Kafka")
 				.addKeyValue("action", "event_dead_lettered")
+				.addKeyValue("order_id", record.key())
 				.addKeyValue("topic", record.topic())
 				.addKeyValue("partition", record.partition())
 				.addKeyValue("offset", record.offset())

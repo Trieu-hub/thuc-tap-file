@@ -56,6 +56,7 @@ class PolicyIssuedListener {
 		EventEnvelope<Payload> event = this.reader.readValue(record.value());
 		// The listener thread is shared by all records, so the MDC is set and cleared per record (F30).
 		MDC.put("correlation_id", event.correlationId());
+		MDC.put("transport", "Kafka");
 		long start = System.nanoTime();
 		try {
 			Payload policy = event.payload();
@@ -81,6 +82,7 @@ class PolicyIssuedListener {
 		}
 		finally {
 			MDC.remove("correlation_id");
+			MDC.remove("transport");
 		}
 	}
 

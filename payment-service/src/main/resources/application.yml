@@ -49,6 +49,10 @@ management:
         enabled: true
 
 logging:
+  level:
+    # The Kafka client logs its whole configuration (dozens of lines) at INFO on every start,
+    # which buries the lines a demo greps for; warnings and errors are kept.
+    org.apache.kafka: WARN
   structured:
     format:
       console: com.sandbox.payment.observability.SandboxJsonLogFormatter

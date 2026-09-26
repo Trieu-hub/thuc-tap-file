@@ -52,6 +52,7 @@ class PaymentRecordedListener {
 		EventEnvelope<Payload> event = this.reader.readValue(record.value());
 		// The listener thread is shared by all records, so the MDC is set and cleared per record (F30).
 		MDC.put("correlation_id", event.correlationId());
+		MDC.put("transport", "Kafka");
 		long start = System.nanoTime();
 		try {
 			IssuePolicyResult result = this.issuer.issue(
@@ -73,6 +74,7 @@ class PaymentRecordedListener {
 		}
 		finally {
 			MDC.remove("correlation_id");
+			MDC.remove("transport");
 		}
 	}
 

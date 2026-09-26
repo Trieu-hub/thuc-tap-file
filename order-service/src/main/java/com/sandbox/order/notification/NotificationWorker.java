@@ -32,6 +32,7 @@ public class NotificationWorker {
 			.addKeyValue("order_id", orderId)
 			.addKeyValue("status", "SUCCESS")
 			.addKeyValue("policy_number", policyNumber)
+			.addKeyValue("execution_time_ms", (System.nanoTime() - start) / 1_000_000)
 			.log("SMS sent (simulated)");
 		this.progress.recordStep(orderId, new TimelineEntry(TimelineStep.NOTIFICATION, "notification-worker",
 				"IN_PROCESS", "SUCCESS", (System.nanoTime() - start) / 1_000_000, "SMS sent (simulated)"));

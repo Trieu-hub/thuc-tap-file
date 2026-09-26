@@ -61,6 +61,7 @@ public class OrderProgressService {
 		if (eventId != null && !this.inbox.tryClaim(eventId, POLICY_ISSUED_EVENT)) {
 			log.atInfo()
 				.addKeyValue("action", "duplicate_event_ignored")
+				.addKeyValue("status", "IGNORED")
 				.addKeyValue("event_id", eventId)
 				.addKeyValue("order_id", orderId)
 				.log("Event already processed, order left unchanged");
@@ -141,6 +142,7 @@ public class OrderProgressService {
 		catch (DuplicateKeyException ex) {
 			log.atInfo()
 				.addKeyValue("action", "duplicate_timeline_step_ignored")
+				.addKeyValue("status", "IGNORED")
 				.addKeyValue("order_id", orderId)
 				.addKeyValue("step", entry.step().name())
 				.log("Timeline step already recorded");

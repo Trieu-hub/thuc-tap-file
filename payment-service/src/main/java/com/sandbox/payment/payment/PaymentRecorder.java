@@ -74,6 +74,7 @@ public class PaymentRecorder {
 		if (existing.size() == 1 && stored.matches(command)) {
 			log.atInfo()
 				.addKeyValue("action", "duplicate_payment_ignored")
+				.addKeyValue("status", "IGNORED")
 				.addKeyValue("order_id", command.orderId())
 				.addKeyValue("payment_id", stored.paymentId())
 				.log("Payment already recorded, returning the stored result");
@@ -82,6 +83,7 @@ public class PaymentRecorder {
 		// Same key, different content: never return someone else's payment and never charge again.
 		log.atWarn()
 			.addKeyValue("action", "idempotency_key_mismatch")
+			.addKeyValue("status", "REJECTED")
 			.addKeyValue("order_id", command.orderId())
 			.addKeyValue("partner_transaction_id", command.partnerTransactionId())
 			.log("Payment request reuses an idempotency key with different content");

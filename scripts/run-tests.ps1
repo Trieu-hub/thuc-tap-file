@@ -24,7 +24,7 @@ $watch = [Diagnostics.Stopwatch]::StartNew()
 mvn -B -ntp package *> $log
 $exitCode = $LASTEXITCODE
 
-Select-String -Path $log -Pattern '^\[INFO\] Building (\S+)', '^\[(INFO|ERROR|WARNING)\] Tests run: \d+, Failures: \d+, Errors: \d+, Skipped: \d+$', '<<< (FAILURE|ERROR)!', '^\[INFO\] BUILD \w+' |
+Select-String -Path $log -Pattern '^\[INFO\] Building [\w-]+ [0-9]', '^\[(INFO|ERROR|WARNING)\] Tests run: \d+, Failures: \d+, Errors: \d+, Skipped: \d+$', '<<< (FAILURE|ERROR)!', '^\[INFO\] BUILD \w+' |
 	ForEach-Object { $_.Line }
 Write-Host ('Finished in {0:N1} min, exit code {1}' -f $watch.Elapsed.TotalMinutes, $exitCode)
 

@@ -11,7 +11,8 @@ import org.springframework.grpc.server.GlobalServerInterceptor;
 import org.springframework.stereotype.Component;
 
 /**
- * Copies the business correlation id from gRPC metadata {@code x-correlation-id} into the MDC.
+ * Copies the business correlation id from gRPC metadata {@code x-correlation-id} into the MDC,
+ * together with {@code transport=gRPC}.
  * <p>
  * gRPC may run the callbacks of one call on different executor threads, so the MDC is set around
  * each callback and cleared in {@code finally} (F30); for a unary call the service method runs
@@ -30,11 +31,13 @@ class CorrelationIdServerInterceptor implements ServerInterceptor {
 		String correlationId = headers.get(CORRELATION_ID);
 		ServerCall.Listener<Q> delegate;
 		MDC.put("correlation_id", correlationId);
+		MDC.put("transport", "gRPC");
 		try {
 			delegate = next.startCall(call, headers);
 		}
 		finally {
 			MDC.remove("correlation_id");
+			MDC.remove("transport");
 		}
 		return new ForwardingServerCallListener.SimpleForwardingServerCallListener<>(delegate) {
 
@@ -63,11 +66,13 @@ class CorrelationIdServerInterceptor implements ServerInterceptor {
 
 	private static void withCorrelationId(String correlationId, Runnable action) {
 		MDC.put("correlation_id", correlationId);
+		MDC.put("transport", "gRPC");
 		try {
 			action.run();
 		}
 		finally {
 			MDC.remove("correlation_id");
+			MDC.remove("transport");
 		}
 	}
 
