@@ -3,6 +3,7 @@ package com.sandbox.order.cache;
 import java.time.Duration;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.function.Supplier;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -19,7 +20,9 @@ import org.springframework.stereotype.Component;
  * <p>
  * Redis is an optimisation, not a dependency (D12): every Redis error is logged as
  * {@code redis_unavailable} and reported as "unknown", and the caller falls back to MySQL, whose
- * {@code UNIQUE(partner_order_id)} is the second line of defence.
+ * {@code UNIQUE(partner_order_id)} is the second line of defence. While {@link RedisAvailability}
+ * says Redis just failed, commands are not even sent (and not logged), so a request does not wait
+ * for one timeout per command.
  */
 @Component
 public class IdempotencyStore {
@@ -32,8 +35,11 @@ public class IdempotencyStore {
 
 	private final StringRedisTemplate redis;
 
-	public IdempotencyStore(StringRedisTemplate redis) {
+	private final RedisAvailability availability;
+
+	public IdempotencyStore(StringRedisTemplate redis, RedisAvailability availability) {
 		this.redis = redis;
+		this.availability = availability;
 	}
 
 	public enum Claim {
@@ -51,62 +57,59 @@ public class IdempotencyStore {
 
 	/** The order_id stored for this partner_order_id, or empty if there is none or Redis is down. */
 	public Optional<String> find(String partnerOrderId) {
-		try {
-			return Optional.ofNullable(this.redis.opsForValue().get(key(partnerOrderId)));
-		}
-		catch (RuntimeException ex) {
-			unavailable("find", partnerOrderId, ex);
-			return Optional.empty();
-		}
+		return call("find", partnerOrderId, () -> Optional.ofNullable(this.redis.opsForValue().get(key(partnerOrderId))),
+				Optional.empty());
 	}
 
 	/** {@code SET key order_id NX EX 30}: atomic, so of two identical requests only one gets CLAIMED. */
 	public Claim claim(String partnerOrderId, String orderId) {
-		try {
+		return call("claim", partnerOrderId, () -> {
 			Boolean set = this.redis.opsForValue().setIfAbsent(key(partnerOrderId), orderId, CLAIM_TTL);
 			return Boolean.TRUE.equals(set) ? Claim.CLAIMED : Claim.TAKEN;
-		}
-		catch (RuntimeException ex) {
-			unavailable("claim", partnerOrderId, ex);
-			return Claim.UNAVAILABLE;
-		}
+		}, Claim.UNAVAILABLE);
 	}
 
 	/** The order row is committed: keep the key for 24 h. */
 	public void confirm(String partnerOrderId) {
-		try {
-			this.redis.expire(key(partnerOrderId), KEY_TTL);
-		}
-		catch (RuntimeException ex) {
-			// The key then expires after 30 s; MySQL's UNIQUE constraint still rejects a later duplicate.
-			unavailable("confirm", partnerOrderId, ex);
-		}
+		// If Redis fails here, the key expires after 30 s; MySQL's UNIQUE constraint still rejects a later duplicate.
+		call("confirm", partnerOrderId, () -> this.redis.expire(key(partnerOrderId), KEY_TTL), null);
 	}
 
 	/** The insert failed: free the key so a retry is not answered 409, but only if it is still ours. */
 	public void release(String partnerOrderId, String orderId) {
-		try {
+		call("release", partnerOrderId, () -> {
 			if (Objects.equals(this.redis.opsForValue().get(key(partnerOrderId)), orderId)) {
 				this.redis.delete(key(partnerOrderId));
 			}
-		}
-		catch (RuntimeException ex) {
-			unavailable("release", partnerOrderId, ex);
-		}
+			return null;
+		}, null);
 	}
 
 	static String key(String partnerOrderId) {
 		return "idempotency:order:" + partnerOrderId;
 	}
 
-	private static void unavailable(String operation, String partnerOrderId, RuntimeException ex) {
-		log.atWarn()
-			.addKeyValue("action", "redis_unavailable")
-			.addKeyValue("operation", "idempotency_" + operation)
-			.addKeyValue("partner_order_id", partnerOrderId)
-			.addKeyValue("status", "DEGRADED")
-			.addKeyValue("error", ex.getClass().getSimpleName())
-			.log("Redis unavailable, falling back to MySQL for idempotency");
+	/** Runs one Redis command, or returns the "Redis did not answer" value without calling it. */
+	private <T> T call(String operation, String partnerOrderId, Supplier<T> command, T unavailable) {
+		if (!this.availability.shouldTry()) {
+			return unavailable;
+		}
+		try {
+			T result = command.get();
+			this.availability.markSuccess();
+			return result;
+		}
+		catch (RuntimeException ex) {
+			this.availability.markFailure();
+			log.atWarn()
+				.addKeyValue("action", "redis_unavailable")
+				.addKeyValue("operation", "idempotency_" + operation)
+				.addKeyValue("partner_order_id", partnerOrderId)
+				.addKeyValue("status", "DEGRADED")
+				.addKeyValue("error", ex.getClass().getSimpleName())
+				.log("Redis unavailable, falling back to MySQL for idempotency");
+			return unavailable;
+		}
 	}
 
 }
