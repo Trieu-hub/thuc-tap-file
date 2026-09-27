@@ -54,6 +54,10 @@ sandbox:
   grpc:
     # Deadline of each RecordPayment call, same budget as the Flow 1 RPC timeout (D8).
     payment-deadline: 3000ms
+  redis:
+    # After a Redis error, skip Redis (MySQL only) for this long instead of paying the 300 ms timeout
+    # on every command; the first command after the window tries Redis again (RedisAvailability, D12).
+    retry-after: 5s
 
 server:
   port: 8080

@@ -2,6 +2,7 @@ package com.sandbox.order.cache;
 
 import java.time.Duration;
 import java.util.Optional;
+import java.util.function.Supplier;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -29,7 +30,8 @@ import com.sandbox.order.order.TimelineStep;
  * key, and the UI would poll PAYMENT_RECORDED (or PROCESSING_FAILED, which can still become ISSUED)
  * for 10 minutes. The notification is its own transaction after ISSUED, hence it is part of the test.</li>
  * </ul>
- * Redis errors fall back to MySQL and are reported as a miss (D12).
+ * Redis errors fall back to MySQL and are reported as a miss (D12); while {@link RedisAvailability}
+ * says Redis just failed, commands are not sent at all.
  */
 @Component
 public class OrderReadCache {
@@ -44,10 +46,14 @@ public class OrderReadCache {
 
 	private final OrderRepository orders;
 
-	public OrderReadCache(StringRedisTemplate redis, JsonMapper jsonMapper, OrderRepository orders) {
+	private final RedisAvailability availability;
+
+	public OrderReadCache(StringRedisTemplate redis, JsonMapper jsonMapper, OrderRepository orders,
+			RedisAvailability availability) {
 		this.redis = redis;
 		this.jsonMapper = jsonMapper;
 		this.orders = orders;
+		this.availability = availability;
 	}
 
 	/** An order and where it was read from. */
@@ -68,13 +74,8 @@ public class OrderReadCache {
 	/** Deletes the key once the change is committed, so a GET after it cannot read the old copy. */
 	@TransactionalEventListener
 	void onOrderChanged(OrderChangedEvent event) {
-		try {
-			this.redis.delete(key(event.orderId()));
-		}
-		catch (RuntimeException ex) {
-			// Only finished orders are cached, and the key expires after 10 min anyway.
-			unavailable("evict", event.orderId(), ex);
-		}
+		// If Redis is skipped or fails: only finished orders are cached, and the key expires after 10 min anyway.
+		call("evict", event.orderId(), () -> this.redis.delete(key(event.orderId())), null);
 	}
 
 	static boolean isFinished(OrderView order) {
@@ -87,14 +88,7 @@ public class OrderReadCache {
 	}
 
 	private Optional<OrderView> get(String orderId) {
-		String json;
-		try {
-			json = this.redis.opsForValue().get(key(orderId));
-		}
-		catch (RuntimeException ex) {
-			unavailable("get", orderId, ex);
-			return Optional.empty();
-		}
+		String json = call("get", orderId, () -> this.redis.opsForValue().get(key(orderId)), null);
 		if (json == null) {
 			return Optional.empty();
 		}
@@ -113,22 +107,46 @@ public class OrderReadCache {
 	}
 
 	private void put(OrderView order) {
+		String json;
 		try {
-			this.redis.opsForValue().set(key(order.orderId()), this.jsonMapper.writeValueAsString(order), TTL);
+			json = this.jsonMapper.writeValueAsString(order);
 		}
 		catch (RuntimeException ex) {
-			unavailable("put", order.orderId(), ex);
+			// Not a Redis failure, so the circuit is left alone; the GET is still answered from MySQL.
+			log.atWarn()
+				.addKeyValue("action", "cache_entry_unwritable")
+				.addKeyValue("order_id", order.orderId())
+				.addKeyValue("status", "IGNORED")
+				.log("Order could not be serialised for the cache, not cached");
+			return;
 		}
+		call("put", order.orderId(), () -> {
+			this.redis.opsForValue().set(key(order.orderId()), json, TTL);
+			return null;
+		}, null);
 	}
 
-	private static void unavailable(String operation, String orderId, RuntimeException ex) {
-		log.atWarn()
-			.addKeyValue("action", "redis_unavailable")
-			.addKeyValue("operation", "cache_" + operation)
-			.addKeyValue("order_id", orderId)
-			.addKeyValue("status", "DEGRADED")
-			.addKeyValue("error", ex.getClass().getSimpleName())
-			.log("Redis unavailable, reading MySQL");
+	/** Runs one Redis command, or returns the "Redis did not answer" value without calling it. */
+	private <T> T call(String operation, String orderId, Supplier<T> command, T unavailable) {
+		if (!this.availability.shouldTry()) {
+			return unavailable;
+		}
+		try {
+			T result = command.get();
+			this.availability.markSuccess();
+			return result;
+		}
+		catch (RuntimeException ex) {
+			this.availability.markFailure();
+			log.atWarn()
+				.addKeyValue("action", "redis_unavailable")
+				.addKeyValue("operation", "cache_" + operation)
+				.addKeyValue("order_id", orderId)
+				.addKeyValue("status", "DEGRADED")
+				.addKeyValue("error", ex.getClass().getSimpleName())
+				.log("Redis unavailable, reading MySQL");
+			return unavailable;
+		}
 	}
 
 }
