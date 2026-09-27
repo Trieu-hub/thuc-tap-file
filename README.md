@@ -36,8 +36,6 @@ Kèm theo: Redis (idempotency và cache), log JSON có `correlation_id` xuyên s
   - Log JSON của cả 3 service có `transport` ở mọi dòng, log `GET` có `cache_hit`, và một lệnh là truy vết được một đơn qua 3 service.
 - **Chưa làm:** kiểm thử các kịch bản ngoại lệ trên UI, hoàn thiện README và tập dượt demo (Ngày 5).
 
-Chi tiết tiến độ xem [`current-state.md`](current-state.md).
-
 ---
 
 ## Chạy dự án

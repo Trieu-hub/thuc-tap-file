@@ -1,8 +1,8 @@
 # Kế hoạch triển khai: rủi ro, Docker, khung 3 microservices
 
-> File này giải thích **hướng đi**, được viết trước khi code. Các phần có ghi chú "Đã làm" đã được đối chiếu với code thật (Ngày 1, PR #1, Ngày 2). Những phần còn lại vẫn là **phác thảo, chưa chạy thử**. Khi code thật đã chạy được, cập nhật lại file này và `CLAUDE.md` bằng số liệu thật.
+> File này giải thích **hướng đi**, được viết trước khi code. Các phần có ghi chú "Đã làm" đã được đối chiếu với code thật (Ngày 1, PR #1, Ngày 2). Những phần còn lại vẫn là **phác thảo, chưa chạy thử**. Khi code thật đã chạy được, cập nhật lại file này và `docs/design-decisions.md` bằng số liệu thật.
 >
-> Các mã D1–D10 tham chiếu mục 6 "Design Decisions" trong `CLAUDE.md`. Sơ đồ luồng xem `docs/sequence-diagrams.md`.
+> Các mã D1–D20 nằm trong `docs/design-decisions.md`. Sơ đồ luồng xem `docs/sequence-diagrams.md`.
 
 Mục lục:
 
@@ -222,8 +222,8 @@ thuc-tap-file/
 ├── .gitattributes                  # *.sh eol=lf (F28)
 ├── .gitignore                      # target/, .idea/, *.iml, .env.local
 ├── README.md
-├── CLAUDE.md
 ├── docs/
+│   ├── design-decisions.md         # D1–D20
 │   ├── sequence-diagrams.md
 │   └── implementation-plan.md      # file này
 ├── docker/
@@ -350,13 +350,13 @@ Ngày 1 **chỉ dựng khung**, chưa có nghiệp vụ:
 - [ ] Mở được RabbitMQ UI (15672) và thấy bảng đã được tạo trong 3 schema MySQL
 - [ ] `docs/sequence-diagrams.md` (đã xong)
 
-Chưa làm trong Ngày 1: queue và topic thật, RPC, gRPC, Kafka listener, Redis, UI. Các phần này thuộc Ngày 2–4 theo mục 16 của `CLAUDE.md`.
+Chưa làm trong Ngày 1: queue và topic thật, RPC, gRPC, Kafka listener, Redis, UI. Các phần này thuộc Ngày 2–4 theo lịch 5 ngày ở mục VI của đề (`intern-messaging-grpc-kafka-assignment.md`).
 
 ---
 
 ## 5. Điểm cần chốt thêm
 
-Các điểm dưới đây xuất hiện khi phân tích rủi ro, nhưng **chưa có trong `CLAUDE.md`**. Nếu bạn đồng ý, chúng sẽ được ghi thành decision:
+Các điểm dưới đây xuất hiện khi phân tích rủi ro, nhưng **chưa có trong `docs/design-decisions.md`**. Nếu bạn đồng ý, chúng sẽ được ghi thành decision:
 
 | # | Đề xuất | Liên quan |
 |---|---|---|

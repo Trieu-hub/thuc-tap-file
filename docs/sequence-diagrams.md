@@ -1,6 +1,6 @@
 # Sơ đồ Sequence mở rộng
 
-Hai sơ đồ dưới đây mở rộng sơ đồ trong `intern-messaging-grpc-kafka-assignment.md`, bổ sung các nhánh lỗi, cơ chế chống trùng và hành vi cache. Các mã D1–D10 tham chiếu mục 6 "Design Decisions" trong `CLAUDE.md`.
+Hai sơ đồ dưới đây mở rộng sơ đồ trong `intern-messaging-grpc-kafka-assignment.md`, bổ sung các nhánh lỗi, cơ chế chống trùng và hành vi cache. Các mã D1–D20 nằm trong `docs/design-decisions.md`.
 
 Khối `break` nghĩa là luồng **dừng tại đó** và trả kết quả về ngay.
 
