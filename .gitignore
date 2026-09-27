@@ -6,6 +6,6 @@ target/
 .vscode/
 .DS_Store
 .env.local
+bin/
 current-state.md
 CLAUDE.md
-EOF
