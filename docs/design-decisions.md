@@ -29,6 +29,7 @@
   - It runs once the order reaches `ISSUED`, in both flows.
   - It logs and appends the timeline step `[Thông báo] → Notification Worker → Success (SMS Sent – simulated)`.
   - There is no fourth service, no real SMS or email, and no extra infrastructure.
+  - Its timeline step and logs use `transport = IN_PROCESS`, a fifth value next to the spec's `HTTP`, `RabbitMQ`, `gRPC` and `Kafka`: the step crosses no network boundary, and labelling it with one of the four would misstate where it ran.
 
 - **D6: List endpoint.** `GET /api/v1/orders` reads from the database (it is not cached) and returns the newest orders first.
 
