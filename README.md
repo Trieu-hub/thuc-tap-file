@@ -221,26 +221,7 @@ docker compose --profile tools up -d kafka-ui   # rồi mở http://localhost:80
 
 Chọn cluster `sandbox` → **Topics**. Có 4 topic, mỗi topic 3 partition: `payment.recorded`, `policy.issued`, `payment.recorded.DLT`, `policy.issued.DLT`. Ở tab **Messages** của một topic sẽ thấy key (`order_id`), partition và value (envelope JSON). Mọi event của cùng một đơn luôn nằm trên cùng một partition.
 
-Gửi lại một event để thử chống trùng (PowerShell; hoặc dùng **Produce Message** trong Kafka UI với cùng key và value). Thay `<ORDER_ID>` bằng mã một đơn Luồng 2 đã `ISSUED`:
-
-```powershell
-$id = '<ORDER_ID>'
-$ev = (docker compose exec -T kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic payment.recorded --from-beginning --formatter-property print.key=true --formatter-property 'key.separator=|' --timeout-ms 5000 2>$null | Select-String $id | Select-Object -First 1).Line.TrimStart([char]0xFEFF); "event: $ev"
-$ev, 'ORD-GARBAGE-1|{not json' | docker compose exec -T kafka sh -c "awk 'NR==1{sub(/^\357\273\277/,e)} {sub(/\r$/,e); print}' | /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server localhost:9092 --topic payment.recorded --reader-property parse.key=true --reader-property key.separator='|'"
-Start-Sleep -Seconds 3; docker compose logs --no-log-prefix --since 1m policy-service order-service | Select-String 'duplicate_event_ignored|event_dead_lettered' | ForEach-Object { $_.Line | ConvertFrom-Json } | Select-Object service, action, order_id, event_id | Format-Table -AutoSize
-"SELECT COUNT(*) AS policies FROM policy_db.policies WHERE order_id = '$id';" | docker compose exec -T mysql sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" 2>/dev/null'
-```
-
-Lưu ý khi dùng PowerShell:
-- **BOM:** khi pipe vào `docker compose exec`, PowerShell có thể chèn BOM UTF-8 (`EF BB BF`) vào đầu dữ liệu, tùy `[Console]::InputEncoding` của máy, và thêm `\r` cuối mỗi dòng. BOM dính vào key sẽ làm key khác `order_id`, nên message rơi vào partition khác. Vì vậy dữ liệu đi qua `awk` trong container để bỏ BOM và `\r` trước khi tới Kafka. `.TrimStart([char]0xFEFF)` dùng cho trường hợp topic đã có sẵn bản ghi dính BOM. Đã kiểm tra: bản replay có cùng partition và cùng key (21 ký tự) với bản gốc.
-- Chuỗi trong `sh -c "..."` không chứa dấu nháy kép, vì PowerShell 5.1 làm mất dấu nháy kép khi truyền tham số cho chương trình ngoài.
-- `'key.separator=|'` phải nằm trong dấu nháy, nếu không `|` sẽ bị hiểu là pipe.
-- Câu SQL được đưa vào `mysql` qua pipe (stdin), không truyền bằng `-e "..."`: PowerShell 5.1 làm mất dấu nháy kép khi truyền tham số cho chương trình ngoài.
-
-Kết quả đã kiểm chứng:
-- policy-service log `duplicate_event_ignored` rồi publish lại `policy.issued`; order-service cũng log `duplicate_event_ignored`.
-- `policy_db.policies` vẫn chỉ có 1 dòng cho đơn đó, và timeline vẫn 4 bước.
-- Message `{not json` vào `payment.recorded.DLT` ngay (log `event_dead_lettered`), không retry.
+Gửi lại event trùng và gửi message lỗi vào DLT: xem [Kịch bản ngoại lệ (Ngày 5)](#kịch-bản-ngoại-lệ-ngày-5).
 
 ### Thử hai tình huống publish lỗi (PowerShell, đã chạy thật ngày 2026-09-25)
 
@@ -283,6 +264,75 @@ Start-Sleep -Seconds 5; "status: " + (Invoke-RestMethod "http://localhost:8080/a
 (PowerShell 5.1 không có `&&`, nên các lệnh nối nhau bằng `;`.)
 
 Kết quả: Policy log `DUPLICATE_EVENT_IGNORED` rồi `PublishPolicyIssued`; Order log `ApplyPolicyIssued outcome=APPLIED`. Khoảng 2 s sau đơn là `ISSUED`, vẫn 1 hợp đồng, timeline 4 bước. Đây là lý do Policy publish lại `policy.issued` khi gặp event trùng.
+
+---
+
+## Kịch bản ngoại lệ (Ngày 5)
+
+Ba kịch bản dưới đây chạy trên sandbox đang chạy (`docker compose up -d --wait`), bằng Windows PowerShell 5.1. Mỗi kịch bản tự tạo đơn cần dùng. Chạy lần lượt từng dòng trong **cùng một cửa sổ PowerShell**, vì biến (`$id`, `$ev`) được giữ từ dòng này sang dòng sau. Kết quả mẫu bên dưới đo ngày 2026-09-28.
+
+### (a) DLQ của RabbitMQ: Payment tắt, request hết hạn
+
+```powershell
+docker compose exec -T rabbitmq rabbitmqctl list_queues name messages | Select-String 'dlq'
+docker compose stop payment-service
+$body = '{"partner_order_id":"DLQ-' + (Get-Date -Format HHmmss) + '","customer_name":"A","phone":"0901234567","amount":500000,"mode":"RABBITMQ_RPC"}'; $sw = [Diagnostics.Stopwatch]::StartNew(); $a = Invoke-RestMethod -Method Post -Uri http://localhost:8080/api/v1/orders -ContentType 'application/json' -Body $body; "elapsed_ms=$($sw.ElapsedMilliseconds) status=$($a.status) failure_reason=$($a.failure_reason)"
+Start-Sleep -Seconds 2; docker compose exec -T rabbitmq rabbitmqctl list_queues name messages | Select-String 'dlq'
+docker compose up -d --wait payment-service
+$body = '{"partner_order_id":"WARM-' + (Get-Date -Format HHmmss) + '","customer_name":"A","phone":"0901234567","amount":500000,"mode":"RABBITMQ_RPC"}'; $sw = [Diagnostics.Stopwatch]::StartNew(); $a = Invoke-RestMethod -Method Post -Uri http://localhost:8080/api/v1/orders -ContentType 'application/json' -Body $body; "warm-up: elapsed_ms=$($sw.ElapsedMilliseconds) status=$($a.status)"
+```
+
+**Kết quả mong đợi:**
+- `POST` trả `200` sau khoảng 3 giây với `PROCESSING_FAILED` / `PAYMENT_TIMEOUT`. HTTP không treo.
+- `payment.rpc.request.dlq` tăng đúng 1. Request nằm trong queue quá TTL 3 giây, không ai nhận, nên bị chuyển vào DLQ thay vì được xử lý muộn.
+- Đơn mồi (dòng cuối) trả `ISSUED`.
+
+Kết quả thật: `elapsed_ms=3269 status=PROCESSING_FAILED failure_reason=PAYMENT_TIMEOUT`; DLQ từ `2` lên `3`; đơn mồi `182 ms ISSUED`.
+
+**Vì sao gửi đơn mồi:** request đầu tiên sau khi một service vừa khởi động lại có thể mất khoảng 2,8 giây (khởi tạo kết nối, nạp class), sát timeout 3 giây. Đơn mồi giúp đơn demo tiếp theo không bị timeout oan.
+
+### (b) DLT của Kafka: message không phải JSON
+
+```powershell
+docker compose exec -T kafka /opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server localhost:9092 --topic payment.recorded.DLT
+$key = 'GARBAGE-' + (Get-Date -Format HHmmss); "$key|{not json" | docker compose exec -T kafka /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server localhost:9092 --topic payment.recorded --reader-property parse.key=true --reader-property key.separator="|"
+Start-Sleep -Seconds 3; docker compose exec -T kafka /opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server localhost:9092 --topic payment.recorded.DLT
+docker compose logs --no-log-prefix --since 1m policy-service | Select-String 'event_dead_lettered' | ForEach-Object { $_.Line | ConvertFrom-Json } | Select-Object timestamp, action, topic, partition, offset | Format-Table -AutoSize
+```
+
+**Kết quả mong đợi:**
+- `kafka-get-offsets.sh` in `topic:partition:offset`. Sau khi gửi, tổng offset của `payment.recorded.DLT` tăng đúng 1.
+- policy-service log `event_dead_lettered`. Message không đọc được thì vào DLT **ngay**, không retry, và consumer đi tiếp (không kẹt).
+
+Kết quả thật: `payment.recorded.DLT:1:0` thành `payment.recorded.DLT:1:1`; log `event_dead_lettered payment.recorded partition 1 offset 10`.
+
+### (c) Gửi lại event trùng: vẫn 1 hợp đồng
+
+Tạo 1 đơn Luồng 2, đọc event `payment.recorded` của đơn đó, rồi gửi lại event 3 lần:
+
+```powershell
+$body = '{"partner_order_id":"REPLAY-' + (Get-Date -Format HHmmss) + '","customer_name":"A","phone":"0901234567","amount":500000,"mode":"GRPC_KAFKA"}'; $a = Invoke-RestMethod -Method Post -Uri http://localhost:8080/api/v1/orders -ContentType 'application/json' -Body $body; $id = $a.order_id; Start-Sleep -Seconds 3; "order_id=$id status=" + (Invoke-RestMethod "http://localhost:8080/api/v1/orders/$id").status
+$ev = (docker compose exec -T kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic payment.recorded --from-beginning --formatter-property print.key=true --formatter-property 'key.separator=|' --timeout-ms 5000 2>$null | Select-String $id | Select-Object -First 1).Line; "event: $ev"
+$ev, $ev, $ev | docker compose exec -T kafka sh -c "awk 'NR==1{sub(/^\357\273\277/,e)} {sub(/\r$/,e); print}' | /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server localhost:9092 --topic payment.recorded --reader-property parse.key=true --reader-property key.separator='|'"
+Start-Sleep -Seconds 5; docker compose logs --no-log-prefix --since 1m policy-service order-service | Select-String $id | ForEach-Object { $_.Line | ConvertFrom-Json } | Where-Object action -eq 'duplicate_event_ignored' | Select-Object timestamp, service, action, order_id | Format-Table -AutoSize
+"SELECT COUNT(*) AS policies FROM policy_db.policies WHERE order_id = '$id';" | docker compose exec -T mysql sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" 2>/dev/null'
+"timeline steps: " + ((Invoke-RestMethod "http://localhost:8080/api/v1/orders/$id").timeline.step -join ', ')
+```
+
+**Kết quả mong đợi:**
+- `duplicate_event_ignored` xuất hiện **3 lần ở policy-service** (inbox theo `event_id`). Mỗi lần, Policy publish lại `policy.issued` với hợp đồng cũ.
+- `duplicate_event_ignored` xuất hiện **3 lần ở order-service** (`event_id` của `policy.issued` là tất định).
+- `policies = 1`.
+- Timeline vẫn 4 bước: `ORDER_CREATED, PAYMENT, POLICY_ISSUANCE, NOTIFICATION`.
+
+Kết quả thật đúng như trên. Cả 3 bản gửi lại nằm cùng partition, cùng key (21 ký tự) với event gốc. Có thể làm tương tự trên Kafka UI (**Produce Message**, cùng key và value).
+
+**Vì sao (c) dùng `sh -c` + `awk` còn (b) thì không:** khi pipe vào `docker compose exec`, PowerShell 5.1 chèn BOM UTF-8 vào đầu dòng đầu tiên, kể cả trong cửa sổ mới mở (đã thử 2026-09-28). Với (b), key rác dính BOM cũng không sao. Với (c), bản gửi lại đầu tiên sẽ có key `<BOM>ORD-…` (22 ký tự) và rơi vào **partition khác** với event gốc. Việc chống trùng vẫn đúng, nhưng thứ tự event theo `order_id` không còn được giữ. `awk` trong container bỏ BOM và `\r` trước khi dữ liệu tới Kafka.
+
+Lưu ý khi dùng PowerShell 5.1:
+- Chuỗi trong `sh -c "..."` không chứa dấu nháy kép, vì PowerShell 5.1 làm mất dấu nháy kép khi truyền tham số cho chương trình ngoài. Vì vậy bên trong dùng `key.separator='|'`.
+- Với `--formatter-property`, `'key.separator=|'` phải nằm trong dấu nháy, nếu không `|` sẽ bị hiểu là pipe.
+- Câu SQL được đưa vào `mysql` qua pipe (stdin), không truyền bằng `-e "..."`.
 
 ---
 
