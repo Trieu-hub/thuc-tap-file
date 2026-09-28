@@ -1,6 +1,6 @@
 # Sơ đồ Sequence mở rộng
 
-Hai sơ đồ dưới đây mở rộng sơ đồ trong `intern-messaging-grpc-kafka-assignment.md`, bổ sung các nhánh lỗi, cơ chế chống trùng và hành vi cache. Các mã D1–D20 nằm trong `docs/design-decisions.md`.
+Hai sơ đồ dưới đây mở rộng sơ đồ trong `intern-messaging-grpc-kafka-assignment.md`, bổ sung các nhánh lỗi, cơ chế chống trùng và hành vi cache. Các mã D1–D21 nằm trong `docs/design-decisions.md`.
 
 Khối `break` nghĩa là luồng **dừng tại đó** và trả kết quả về ngay.
 
@@ -28,10 +28,10 @@ sequenceDiagram
 
     Note over Order,Redis: Ngày 2 chưa có Redis: tra partner_order_id trong order_db; hai request đồng thời thì request thua INSERT (UNIQUE) nhận 409 (D11, D12)
     Order->>Redis: SET idempotency:order:{partner_order_id} {order_id} NX EX 86400
-    break Key đã tồn tại (request trùng)
+    break Key đã tồn tại (request trùng, D21)
         Redis-->>Order: nil, GET key lấy order_id gốc
-        Order->>ODB: Đọc đơn gốc
-        Order-->>UI: 200 OK, kết quả đơn gốc, idempotent_replay=true
+        Order->>ODB: Đọc đơn gốc, so 5 trường của request
+        Order-->>UI: 409 DUPLICATE_ORDER (kèm order_id gốc) hoặc 409 DUPLICATE_ORDER_MISMATCH (dữ liệu khác)
     end
     Redis-->>Order: OK (giữ key thành công)
     Order->>ODB: INSERT order (CREATED), timeline [Tạo đơn]
@@ -113,7 +113,7 @@ sequenceDiagram
     UI->>Order: POST /api/v1/orders (mode=GRPC_KAFKA)
     Order->>Order: Validate schema, sinh order_id, correlation_id, partner_transaction_id
     Order->>Redis: SET idempotency:order:{partner_order_id} {order_id} NX EX 86400
-    Note right of Order: Input sai → 400, request trùng → 200 idempotent_replay (giống hệt Luồng 1)
+    Note right of Order: Input sai → 400, request trùng → 409 DUPLICATE_ORDER / DUPLICATE_ORDER_MISMATCH (giống hệt Luồng 1, D21)
     Order->>ODB: INSERT order (CREATED), timeline [Tạo đơn]
 
     Note over Order,Pay: Bước 1 - gRPC đồng bộ (cần kết quả thanh toán ngay)

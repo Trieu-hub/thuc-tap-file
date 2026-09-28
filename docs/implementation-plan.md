@@ -2,7 +2,7 @@
 
 > File này giải thích **hướng đi**, được viết trước khi code. Các phần có ghi chú "Đã làm" đã được đối chiếu với code thật (Ngày 1, PR #1, Ngày 2). Những phần còn lại vẫn là **phác thảo, chưa chạy thử**. Khi code thật đã chạy được, cập nhật lại file này và `docs/design-decisions.md` bằng số liệu thật.
 >
-> Các mã D1–D20 nằm trong `docs/design-decisions.md`. Sơ đồ luồng xem `docs/sequence-diagrams.md`.
+> Các mã D1–D21 nằm trong `docs/design-decisions.md`. Sơ đồ luồng xem `docs/sequence-diagrams.md`.
 
 Mục lục:
 
@@ -26,7 +26,7 @@ Mỗi dòng gồm: chuyện gì xảy ra, hệ thống phải phản ứng thế
 | ID | Tình huống | Phản ứng mong muốn | Cách tái hiện | Mức |
 |---|---|---|---|---|
 | F1 | Input sai: thiếu trường, `amount ≤ 0`, sai `mode` | `400`, không tạo đơn, không đụng Redis hay broker | Gửi form thiếu trường | Bắt buộc |
-| F2 | Bấm **Gửi lại Request trùng** (gửi tuần tự) | `SET NX` thất bại → trả kết quả đơn gốc, `idempotent_replay=true`, không tạo đơn mới (D4) | Nút trên UI | Bắt buộc |
+| F2 | Bấm **Gửi lại Request trùng** (gửi tuần tự) | Key đã có → so 5 trường với đơn gốc → `409 DUPLICATE_ORDER` (kèm `order_id` gốc) hoặc `409 DUPLICATE_ORDER_MISMATCH` nếu dữ liệu khác; không tạo đơn mới (D21, thay cho `200 idempotent_replay` ban đầu) | Nút trên UI | Bắt buộc |
 | F3 | Hai request trùng đến **cùng lúc** | Chỉ một request giữ được key nhờ `SET NX`. Request kia thấy key nhưng đơn gốc có thể **chưa kịp INSERT** vào DB → trả `409 Conflict` "đơn đang được xử lý" | Gửi 2 request song song bằng script hoặc Postman Runner | Nên có |
 | F4 | Order crash sau khi giữ key Redis nhưng trước khi INSERT đơn | Key "mồ côi" chặn mọi lần thử lại trong 24h. Nếu lỗi có thể bắt được (exception) thì `DEL` key trong khối `catch`. Nếu process chết hẳn thì chấp nhận | Khó tái hiện, chỉ giải thích | Giới hạn |
 | F5 | Redis bị tắt | Tạo đơn: dựa vào `UNIQUE(partner_order_id)` trong MySQL làm lớp chống trùng thứ hai. Đọc đơn: đọc thẳng DB, `cache_status=CACHE_MISS_DB`. Hệ thống chậm hơn nhưng **không sập** | `docker compose stop redis` | Nên có |
@@ -223,7 +223,7 @@ thuc-tap-file/
 ├── .gitignore                      # target/, .idea/, *.iml, .env.local
 ├── README.md
 ├── docs/
-│   ├── design-decisions.md         # D1–D20
+│   ├── design-decisions.md         # D1–D21
 │   ├── sequence-diagrams.md
 │   └── implementation-plan.md      # file này
 ├── docker/
