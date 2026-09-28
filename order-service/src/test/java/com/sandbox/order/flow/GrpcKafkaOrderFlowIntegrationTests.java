@@ -185,14 +185,20 @@ class GrpcKafkaOrderFlowIntegrationTests {
 		HttpResponse<String> response = post(order("P-GRPC-SLOW"));
 		Duration took = Duration.between(start, Instant.now());
 
-		assertThat(took).as("waits the 3 s deadline, then answers without hanging")
-			.isBetween(Duration.ofMillis(2900), Duration.ofMillis(3500));
 		assertThat(response.statusCode()).isEqualTo(200);
 		JsonNode body = json(response);
 		assertThat(body.path("status").asString()).isEqualTo("PROCESSING_FAILED");
 		assertThat(body.path("failure_reason").asString()).isEqualTo(GrpcKafkaOrderFlow.PAYMENT_TIMEOUT);
 		assertThat(steps(body)).containsExactly("ORDER_CREATED", "PROCESSING_FAILED");
 		assertThat(body.path("timeline").get(1).path("detail").asString()).contains("grpc_status=DEADLINE_EXCEEDED");
+		// The deadline is checked on the gRPC wait itself: the PROCESSING_FAILED step's duration_ms is the
+		// time spent in RecordPayment (the fake payment answers only after 4 s). The whole request also
+		// includes MySQL writes before and after the call; on an overloaded machine (MySQL containers
+		// starting in 38 s) they once took 6 s and failed a 3.5 s bound on the request that the deadline
+		// had in fact kept.
+		assertThat(body.path("timeline").get(1).path("duration_ms").asLong())
+			.as("gRPC wait stopped by the 3 s deadline").isBetween(2900L, 3500L);
+		assertThat(took).as("the request itself does not hang").isLessThan(Duration.ofSeconds(8));
 		assertThat(output).contains("\"action\":\"grpc_call_failed\"", "\"grpc_status\":\"DEADLINE_EXCEEDED\"");
 	}
 
