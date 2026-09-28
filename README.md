@@ -204,7 +204,11 @@ seq step            service             transport  status  duration_ms detail
 
 Các đơn sau, khi hệ thống đã ổn định: `202` trong khoảng 220–360 ms và `ISSUED` trong khoảng 330–500 ms. Với bước `POLICY_ISSUANCE`, `duration_ms` là thời gian từ lúc Policy phát hành tới lúc Order nhận event.
 
-- **Payment tắt:** `docker compose stop payment-service` rồi gửi đơn mới. Kết quả là `200`, `PROCESSING_FAILED`, `failure_reason = PAYMENT_SERVICE_UNAVAILABLE` sau 373 ms (không chờ hết deadline, vì kết nối bị từ chối ngay). Bật lại bằng `docker compose up -d --wait payment-service`.
+- **Payment tắt:** `docker compose stop payment-service` rồi gửi đơn mới. Kết quả là `200 PROCESSING_FAILED`, với `failure_reason` là **một trong hai**:
+  - `PAYMENT_SERVICE_UNAVAILABLE` (`grpc_status=UNAVAILABLE`), trả về nhanh. Đo ngày 2026-09-28: 70 ms và 92 ms khi gửi ngay sau lúc dừng, 925 ms ở một lần khác.
+  - `PAYMENT_TIMEOUT` (`grpc_status=DEADLINE_EXCEEDED`), sau khoảng 3 giây. Đo cùng ngày: 3199 ms khi gửi khoảng 30 giây sau lúc dừng.
+
+  Lời gọi gRPC không bao giờ chờ quá deadline 3 giây (log `grpc_call_failed` ghi 3004–3146 ms), nên HTTP không bị treo theo Payment. Chưa xác định được vì sao lúc thì ra lỗi này, lúc thì ra lỗi kia; cả hai đều được xử lý như nhau, và mã gRPC gốc nằm trong `detail` của timeline. Bật lại bằng `docker compose up -d --wait payment-service`.
 - **Truy vết:** `docker compose logs --no-log-prefix order-service payment-service policy-service | Select-String <correlation_id>` cho ra log gRPC và Kafka của cả 3 service.
 
 ### Xem Kafka UI
