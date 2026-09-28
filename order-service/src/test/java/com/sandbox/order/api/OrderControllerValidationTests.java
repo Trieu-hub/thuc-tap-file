@@ -13,8 +13,8 @@ import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 
 import com.sandbox.order.cache.OrderReadCache;
+import com.sandbox.order.flow.DuplicateOrderException;
 import com.sandbox.order.flow.GrpcKafkaOrderFlow;
-import com.sandbox.order.flow.OrderResult;
 import com.sandbox.order.flow.RabbitRpcOrderFlow;
 import com.sandbox.order.order.OrderMode;
 import com.sandbox.order.order.OrderRepository;
@@ -81,8 +81,7 @@ class OrderControllerValidationTests {
 
 	@Test
 	void grpcKafkaModeGoesToFlow2AndIsAcceptedWith202() throws Exception {
-		given(this.grpcKafkaFlow.place(any()))
-			.willReturn(new OrderResult(order(OrderStatus.PAYMENT_RECORDED), false));
+		given(this.grpcKafkaFlow.place(any())).willReturn(order(OrderStatus.PAYMENT_RECORDED));
 
 		this.mockMvc
 			.perform(post("/api/v1/orders").contentType(MediaType.APPLICATION_JSON).content("""
@@ -93,19 +92,40 @@ class OrderControllerValidationTests {
 	}
 
 	@Test
-	void grpcKafkaFailureOrReplayIsAnsweredWith200() throws Exception {
-		String body = """
-				{"partner_order_id":"P-1","customer_name":"A","phone":"0901234567","amount":500000,"mode":"GRPC_KAFKA"}""";
-		given(this.grpcKafkaFlow.place(any()))
-			.willReturn(new OrderResult(order(OrderStatus.PROCESSING_FAILED), false))
-			.willReturn(new OrderResult(order(OrderStatus.PAYMENT_RECORDED), true));
+	void grpcKafkaFailureIsAnsweredWith200() throws Exception {
+		given(this.grpcKafkaFlow.place(any())).willReturn(order(OrderStatus.PROCESSING_FAILED));
 
-		this.mockMvc.perform(post("/api/v1/orders").contentType(MediaType.APPLICATION_JSON).content(body))
+		this.mockMvc
+			.perform(post("/api/v1/orders").contentType(MediaType.APPLICATION_JSON).content("""
+					{"partner_order_id":"P-1","customer_name":"A","phone":"0901234567","amount":500000,"mode":"GRPC_KAFKA"}"""))
 			.andExpect(status().isOk())
 			.andExpect(jsonPath("$.status").value("PROCESSING_FAILED"));
-		this.mockMvc.perform(post("/api/v1/orders").contentType(MediaType.APPLICATION_JSON).content(body))
-			.andExpect(status().isOk())
-			.andExpect(jsonPath("$.idempotent_replay").value(true));
+	}
+
+	@Test
+	void identicalDuplicateIsRefusedWith409AndPointsToTheStoredOrder() throws Exception {
+		given(this.flow.place(any())).willThrow(new DuplicateOrderException(order(OrderStatus.ISSUED), false));
+
+		this.mockMvc
+			.perform(post("/api/v1/orders").contentType(MediaType.APPLICATION_JSON).content("""
+					{"partner_order_id":"P-1","customer_name":"A","phone":"0901234567","amount":500000,"mode":"RABBITMQ_RPC"}"""))
+			.andExpect(status().isConflict())
+			.andExpect(jsonPath("$.error").value("DUPLICATE_ORDER"))
+			.andExpect(jsonPath("$.order_id").value("ORD-1"))
+			.andExpect(jsonPath("$.order_status").value("ISSUED"));
+	}
+
+	@Test
+	void duplicateWithDifferentDataIsRefusedWith409WithoutTheStoredOrder() throws Exception {
+		given(this.grpcKafkaFlow.place(any())).willThrow(new DuplicateOrderException(order(OrderStatus.ISSUED), true));
+
+		this.mockMvc
+			.perform(post("/api/v1/orders").contentType(MediaType.APPLICATION_JSON).content("""
+					{"partner_order_id":"P-1","customer_name":"A","phone":"0901234567","amount":999000,"mode":"GRPC_KAFKA"}"""))
+			.andExpect(status().isConflict())
+			.andExpect(jsonPath("$.error").value("DUPLICATE_ORDER_MISMATCH"))
+			.andExpect(jsonPath("$.order_id").doesNotExist())
+			.andExpect(jsonPath("$.order_status").doesNotExist());
 	}
 
 	@Test

@@ -51,6 +51,7 @@ import com.sandbox.order.order.OrderMode;
 import com.sandbox.order.rpc.OrderRpcClient;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 
 /**
  * Redis is down the way a stopped container is: a server accepts the TCP connection and never
@@ -111,14 +112,15 @@ class RedisDownIntegrationTests {
 
 	@Test
 	void ordersAreCreatedAndDuplicatesRecognisedThroughMysql(CapturedOutput output) {
-		NewOrder order = this.intake.newOrder(new PlaceOrderCommand("P-NO-REDIS-" + suffix(), "A", "0901234567", 500_000),
-				OrderMode.GRPC_KAFKA);
+		PlaceOrderCommand command = new PlaceOrderCommand("P-NO-REDIS-" + suffix(), "A", "0901234567", 500_000);
+		NewOrder order = this.intake.newOrder(command, OrderMode.GRPC_KAFKA);
 
 		Instant start = Instant.now();
-		assertThat(this.intake.replay(order.partnerOrderId(), System.nanoTime())).isEmpty();
+		this.intake.rejectDuplicate(command, OrderMode.GRPC_KAFKA, System.nanoTime());
 		this.intake.insert(order, System.nanoTime());
-		assertThat(this.intake.replay(order.partnerOrderId(), System.nanoTime()))
-			.hasValueSatisfying((result) -> assertThat(result.order().orderId()).isEqualTo(order.orderId()));
+		assertThatExceptionOfType(DuplicateOrderException.class)
+			.isThrownBy(() -> this.intake.rejectDuplicate(command, OrderMode.GRPC_KAFKA, System.nanoTime()))
+			.satisfies((ex) -> assertThat(ex.orderId()).isEqualTo(order.orderId()));
 
 		assertThat(Duration.between(start, Instant.now())).as("Redis errors do not make requests hang")
 			.isLessThan(Duration.ofSeconds(3));
@@ -139,8 +141,8 @@ class RedisDownIntegrationTests {
 		});
 		assertThat(second.took()).as("second POST within 5 s: Redis skipped").isLessThan(Duration.ofMillis(500));
 		assertThat(third.took()).as("third POST within 5 s: Redis skipped").isLessThan(Duration.ofMillis(500));
-		assertThat(duplicate.code()).isEqualTo(200);
-		assertThat(duplicate.body().path("idempotent_replay").asBoolean()).as("MySQL still rejects the duplicate").isTrue();
+		assertThat(duplicate.code()).as("MySQL still rejects the duplicate").isEqualTo(409);
+		assertThat(duplicate.body().path("error").asString()).isEqualTo("DUPLICATE_ORDER");
 		assertThat(duplicate.body().path("order_id").asString()).isEqualTo(third.body().path("order_id").asString());
 		assertThat(count(output, "\"action\":\"redis_circuit_open\"")).as("one opening for the whole outage").isEqualTo(1);
 		assertThat(count(output, "\"action\":\"redis_unavailable\"")).as("only the command that failed is logged")

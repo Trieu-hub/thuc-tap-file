@@ -1,4 +1,4 @@
-# Design Decisions (D1–D20)
+# Design Decisions (D1–D21)
 
 > Decisions taken where the assignment (`intern-messaging-grpc-kafka-assignment.md`) is open or contradicts itself, chosen for demo clarity and explainability. Kept in sync with the code; the behaviour-changing ones are also summarised in the README. F-numbers refer to [`implementation-plan.md`](implementation-plan.md).
 
@@ -22,8 +22,8 @@
   - Payment and Policy reply statuses are `RECORDED` / `REJECTED` and `ISSUED`.
   - `REJECTED` is only for invalid payments, such as a bad amount. A **repeated `partner_transaction_id` is not rejected.** Payment returns the **existing** result (`RECORDED`, same `payment_id`) with `duplicate=true`, logs `duplicate_payment_ignored`, and never records a second payment. A caller that retries after a redelivery or a lost reply then gets the correct answer.
   - Input that fails schema validation (missing fields, amount ≤ 0) returns `400` and creates no order.
-  - A duplicate `POST` with the same `partner_order_id` returns **`200 OK` with the original order's current state** plus `"idempotent_replay": true`, and never creates a new order. The UI shows a visible "duplicate, original result returned" badge.
-  - If the duplicate arrives while the original is still being created (the key exists but the order row doesn't yet), the response is `409 Conflict` (D11).
+  - A repeated `POST` with the same `partner_order_id` is **refused with `409`** and never creates a new order: `DUPLICATE_ORDER` when it is identical, `DUPLICATE_ORDER_MISMATCH` when any field differs (D21, replaces the earlier `200` + `idempotent_replay` answer). The UI shows a visible "duplicate, refused" badge next to the original order.
+  - If the duplicate arrives while the original is still being created (the key exists but the order row doesn't yet), the response is `409 ORDER_IN_PROGRESS` (D11).
 
 - **D5: Notification is a simulated in-process step in Order Service (a "Notification Worker" component).**
   - It runs once the order reaches `ISSUED`, in both flows.
@@ -83,7 +83,7 @@ The decisions below come from the failure analysis in `docs/implementation-plan.
   - *Circuit breaker (after Day 4):* one POST makes 4–6 Redis commands, and with Redis down each waited for the 300 ms timeout: about 1.9 s per order instead of ~140 ms. `RedisAvailability` now skips Redis for `sandbox.redis.retry-after` (5 s) after a failure: commands are not sent and not logged, the caller falls back to MySQL at once, and the first command after the window is a real try. `redis_circuit_open` / `redis_circuit_closed` are logged once per outage. No extra library; state is one `AtomicLong`. Measured with Docker: POST with Redis stopped 490 ms for the first order (it pays the failing command), then 176 / 188 ms, against 114–214 ms with Redis up. 5 s is short enough that Redis is used again seconds after it comes back, and long enough that an outage costs one timeout per 5 s instead of one per command.
 - **D13: Forward-only order state transitions (F15), revised Day 3 to match `OrderStatus` from PR #1.** Allowed: `CREATED → PAYMENT_RECORDED`, `CREATED | PAYMENT_RECORDED | PROCESSING_FAILED → ISSUED`, `CREATED | PAYMENT_RECORDED → PROCESSING_FAILED`. Anything else is ignored and logged as `stale_transition_ignored`; the timeline step is still recorded once. Reason: `policy.issued` can overtake the gRPC thread (CREATED → ISSUED), and after a deadline the policy may really be issued, so showing FAILED would be wrong. Documented in the README.
 - **D19 (Day 3): unknown order in `policy.issued` (F22)** throws `OrderNotFoundException`: rollback including the inbox row, 3 retries, then `policy.issued.DLT`. Never acked silently.
-- **D20 (Day 3): Flow 2 HTTP answer.** `202` with the stored status (usually `PAYMENT_RECORDED`, already `ISSUED` if the event won the race); gRPC failure `200 PROCESSING_FAILED`; replay `200`.
+- **D20 (Day 3): Flow 2 HTTP answer.** `202` with the stored status (usually `PAYMENT_RECORDED`, already `ISSUED` if the event won the race); gRPC failure `200 PROCESSING_FAILED`; a repeated `partner_order_id` `409` (D21).
 - **D14: UI polling stops after at most 30 s (F31)** and shows "no result yet, trace with correlation_id".
 - **D15: The UI is static HTML/JS served by nginx (F32).** nginx proxies `/api/` to `order-service:8080`, so the browser sees one origin and CORS is not needed. There is no frontend build step.
 - **D16: Ports.**
@@ -104,6 +104,14 @@ The decisions below come from the failure analysis in `docs/implementation-plan.
   - Order and Payment both depend on `contracts`, so they compile against stubs generated from the same `payment.proto` and cannot drift apart (F16).
   - Small helpers such as `EventEnvelope`, the correlation-id filter and the log formatter are **copied per service**. The contracts between services are the `.proto` and JSON Schemas, never shared Java classes.
 - **D18: Money is an integer amount in VND.** VND has no minor unit, so the amount is `int64 amount` in proto, `integer` in the JSON Schemas, `BIGINT` in MySQL and `long` in Java. Never use `double` or `float` for money.
+- **D21 (lead's requirement, 2026-09-28): a repeated `partner_order_id` is refused with `409`.**
+  - *Rule from the lead:* `partner_order_id` is unique, so it cannot be reused. The first valid request keeps it. A later request with the same data is reported as a duplicate; a later request with different data (e.g. another amount) is a partner-side logic error and is blocked as well.
+  - *Implementation:* before anything else, both flows look the id up (Redis key `idempotency:order:{partner_order_id}`, or MySQL `UNIQUE(partner_order_id)` when Redis is down) and compare all five request fields (`partner_order_id`, `customer_name`, `phone`, `amount`, `mode`) exactly with the stored order.
+    - All equal: `409 DUPLICATE_ORDER` with `order_id` and `order_status` of the stored order, log `duplicate_order_rejected`.
+    - Any different: `409 DUPLICATE_ORDER_MISMATCH` without anything about the stored order, log `duplicate_order_mismatch` with `mismatched_fields` (field names only, never the values). `partner_order_id` is compared too because MySQL finds it case-insensitively (`utf8mb4_unicode_ci`) while Redis does not.
+    - Still being created (key without a committed row): `409 ORDER_IN_PROGRESS` (D11), because there is nothing to compare with yet.
+  - *Difference from the spec:* spec V.1 says "trả về kết quả cũ nếu trùng request". The old answer was `200` with the stored order. It is now an error, but `DUPLICATE_ORDER` still points to the original result (`order_id`, `order_status`; the full order is one `GET /api/v1/orders/{order_id}` away), and the UI shows that original order under the "duplicate, refused" badge. Nothing is charged or issued twice in either case.
+  - *Why not only on a mismatch:* the lead wants every reuse of a unique id to be visible to the partner as an error, not answered as if it were a normal success.
 
 ---
 

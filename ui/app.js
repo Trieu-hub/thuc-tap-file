@@ -85,6 +85,22 @@ async function createOrder(body) {
             showErrors(errors.length ? errors.map((e) => e.field + ': ' + e.message) : ['Dữ liệu không hợp lệ']);
             return;
         }
+        const httpText = 'POST → ' + response.status + ' ' + (HTTP_TEXT[response.status] || '') + ' · ' + elapsed + ' ms';
+        if (response.status === 409 && data && data.error === 'DUPLICATE_ORDER') {
+            // D21: refused, nothing was created. Show the original order the first request created.
+            showResult();
+            setPill('http', httpText, 'bad');
+            setPill('replay', 'Request trùng, đã chặn (409 DUPLICATE_ORDER). Bên dưới là đơn gốc', 'warn');
+            setPill('polling', '');
+            history.replaceState(null, '', '#order=' + encodeURIComponent(data.order_id));
+            await loadOrder(data.order_id);
+            return;
+        }
+        if (response.status === 409 && data && data.error === 'DUPLICATE_ORDER_MISMATCH') {
+            showErrors(['409 DUPLICATE_ORDER_MISMATCH: partner_order_id này đã được dùng cho một đơn khác'
+                + ' với dữ liệu khác, request bị chặn.']);
+            return;
+        }
         if (response.status === 409) {
             showErrors(['409 Conflict: một request giống hệt đang được xử lý, thử lại sau giây lát.']);
             return;
@@ -94,9 +110,8 @@ async function createOrder(body) {
             return;
         }
         showResult();
-        setPill('http', 'POST → ' + response.status + ' ' + (HTTP_TEXT[response.status] || '') + ' · ' + elapsed + ' ms',
-            response.status === 202 ? 'info' : 'ok');
-        $('replay').hidden = !data.idempotent_replay;
+        setPill('http', httpText, response.status === 202 ? 'info' : 'ok');
+        $('replay').hidden = true;
         renderOrder(data);
         // The cache label always comes from a GET, never from the POST response.
         setPill('cache-status', 'đang đọc…');

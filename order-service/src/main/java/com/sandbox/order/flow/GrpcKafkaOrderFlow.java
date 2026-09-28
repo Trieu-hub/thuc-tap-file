@@ -1,7 +1,5 @@
 package com.sandbox.order.flow;
 
-import java.util.Optional;
-
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import org.slf4j.Logger;
@@ -58,12 +56,10 @@ public class GrpcKafkaOrderFlow {
 		this.payments = payments;
 	}
 
-	public OrderResult place(PlaceOrderCommand command) {
+	/** @throws DuplicateOrderException when the partner_order_id already has an order (D21) */
+	public OrderView place(PlaceOrderCommand command) {
 		long start = System.nanoTime();
-		Optional<OrderResult> replay = this.intake.replay(command.partnerOrderId(), start);
-		if (replay.isPresent()) {
-			return replay.get();
-		}
+		this.intake.rejectDuplicate(command, OrderMode.GRPC_KAFKA, start);
 		NewOrder order = this.intake.newOrder(command, OrderMode.GRPC_KAFKA);
 		MDC.put("correlation_id", order.correlationId());
 		try {
@@ -78,7 +74,7 @@ public class GrpcKafkaOrderFlow {
 				.addKeyValue("status", result.status().name())
 				.addKeyValue("execution_time_ms", elapsedMs(start))
 				.log("Order accepted, policy follows through Kafka");
-			return new OrderResult(result, false);
+			return result;
 		}
 		finally {
 			MDC.remove("correlation_id");

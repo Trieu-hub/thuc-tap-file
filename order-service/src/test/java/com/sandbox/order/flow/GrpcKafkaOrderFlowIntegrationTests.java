@@ -128,7 +128,6 @@ class GrpcKafkaOrderFlowIntegrationTests {
 		JsonNode body = json(response);
 		String correlationId = body.path("correlation_id").asString();
 		assertThat(body.path("status").asString()).isEqualTo("PAYMENT_RECORDED");
-		assertThat(body.path("idempotent_replay").asBoolean()).isFalse();
 		assertThat(steps(body)).containsExactly("ORDER_CREATED", "PAYMENT");
 		assertThat(body.path("timeline").get(1).path("transport").asString()).isEqualTo("gRPC");
 		assertThat(payment.correlationIds).containsExactly(correlationId);
@@ -222,14 +221,16 @@ class GrpcKafkaOrderFlowIntegrationTests {
 	}
 
 	@Test
-	void duplicatePartnerOrderIdReturnsStoredOrderWith200WithoutNewGrpcCall() throws Exception {
+	void repeatedPartnerOrderIdIsRefusedWith409WithoutNewGrpcCall() throws Exception {
 		JsonNode first = json(post(order("P-GRPC-DUP")));
-		HttpResponse<String> second = post(order("P-GRPC-DUP"));
+		HttpResponse<String> identical = post(order("P-GRPC-DUP"));
+		HttpResponse<String> otherPhone = post(order("P-GRPC-DUP").replace("0901234567", "0909999999"));
 
-		assertThat(second.statusCode()).isEqualTo(200);
-		JsonNode replay = json(second);
-		assertThat(replay.path("order_id").asString()).isEqualTo(first.path("order_id").asString());
-		assertThat(replay.path("idempotent_replay").asBoolean()).isTrue();
+		assertThat(identical.statusCode()).isEqualTo(409);
+		assertThat(json(identical).path("error").asString()).isEqualTo("DUPLICATE_ORDER");
+		assertThat(json(identical).path("order_id").asString()).isEqualTo(first.path("order_id").asString());
+		assertThat(otherPhone.statusCode()).isEqualTo(409);
+		assertThat(json(otherPhone).path("error").asString()).isEqualTo("DUPLICATE_ORDER_MISMATCH");
 		assertThat(payment.calls).hasValue(1);
 	}
 

@@ -116,7 +116,7 @@ Mở http://localhost:3000 sau khi chạy `docker compose up -d --wait`. Ảnh d
 
 ![Refresh: cache hit](docs/images/03-refresh-cache-hit.jpg)
 
-**4. [Gửi lại Request trùng]:** `200 OK`, nhãn "Request trùng, trả về kết quả cũ", cùng `order_id`, không tạo đơn mới (key `idempotency:order:{partner_order_id}`):
+**4. [Gửi lại Request trùng]:** `409 Conflict`, nhãn "Request trùng, đã chặn (409 DUPLICATE_ORDER)". Không tạo đơn mới, không trừ tiền lần 2; bên dưới vẫn hiện đơn gốc (lấy theo `order_id` trong response 409). Request trùng `partner_order_id` nhưng khác dữ liệu (ví dụ khác số tiền) bị chặn bằng `409 DUPLICATE_ORDER_MISMATCH` (D21):
 
 ![Request trùng](docs/images/04-duplicate-request.jpg)
 
@@ -141,7 +141,7 @@ timestamp                service         transport  action                 statu
 ```
 
 **Redis được dùng ở đâu** (câu nghiệm thu số 5):
-- **Lúc tạo đơn:** key `idempotency:order:{partner_order_id}` (value là `order_id`, TTL 24 giờ) để trả lại kết quả cũ khi request trùng.
+- **Lúc tạo đơn:** key `idempotency:order:{partner_order_id}` (value là `order_id`, TTL 24 giờ) để nhận ra request trùng và chặn bằng `409` (D21).
 - **Lúc xem đơn:** `GET /api/v1/orders/{id}` đọc `order:{order_id}` (TTL 10 phút) trước khi đọc MySQL.
 
 Xem key trong Redis: `docker compose exec redis redis-cli --scan --pattern '*'` và `docker compose exec redis redis-cli TTL order:<ORDER_ID>`.
@@ -165,9 +165,10 @@ Body của `POST` (JSON dùng snake_case, `amount` là số nguyên VND):
 | `200` | 1 (`RABBITMQ_RPC`) | Chạy xong: `status` là `ISSUED` (có `policy_number`) hoặc `PROCESSING_FAILED` (có `failure_reason`: `PAYMENT_TIMEOUT`, `POLICY_TIMEOUT`, lý do từ Payment như `INVALID_AMOUNT`, hoặc `BROKER_UNAVAILABLE`). Chờ tối đa khoảng 6 giây (2 × 3 giây) |
 | `202` | 2 (`GRPC_KAFKA`) | Payment đã ghi nhận qua gRPC: `status = PAYMENT_RECORDED`. Hợp đồng được phát hành sau đó qua Kafka; client polling `GET /api/v1/orders/{id}` tới khi `ISSUED`. Chờ tối đa 3 giây (deadline gRPC) |
 | `200` | 2 (`GRPC_KAFKA`) | Gọi gRPC thất bại: `status = PROCESSING_FAILED`, `failure_reason` là `PAYMENT_TIMEOUT` (`DEADLINE_EXCEEDED`), `PAYMENT_SERVICE_UNAVAILABLE` (`UNAVAILABLE`), `PAYMENT_GRPC_ERROR` (mã gRPC khác) hoặc lý do từ Payment như `INVALID_AMOUNT`. Mã gRPC gốc nằm trong `detail` của timeline và trong log (`grpc_status`) |
-| `200` + `idempotent_replay: true` | cả hai | `partner_order_id` đã tồn tại: trả nguyên đơn cũ ở trạng thái hiện tại, không gọi Payment lần nữa |
 | `400` | cả hai | Body sai; `errors[]` liệt kê field lỗi (tên snake_case), kể cả `mode` không hợp lệ |
-| `409` | cả hai | Hai request trùng đến cùng lúc; request thua trả 409, gửi lại sau |
+| `409 DUPLICATE_ORDER` | cả hai | `partner_order_id` đã có đơn và cả 5 trường giống hệt: request bị chặn, không gọi Payment lần nữa. Body có `order_id` và `order_status` của đơn gốc (D21) |
+| `409 DUPLICATE_ORDER_MISMATCH` | cả hai | `partner_order_id` đã có đơn nhưng khác ít nhất 1 trường (`customer_name`, `phone`, `amount`, `mode`): request bị chặn, body không kèm thông tin đơn gốc (D21) |
+| `409 ORDER_IN_PROGRESS` | cả hai | Hai request trùng đến cùng lúc, đơn gốc chưa ghi xong; request thua trả 409, gửi lại sau (D11) |
 
 Response gồm `order_id` (dạng `ORD-yyyyMMdd-XXXXXXXX`), `status`, `correlation_id` (UUID), `policy_number`, `failure_reason` và `timeline[]`. Mỗi bước timeline có `step`, `service`, `transport`, `status`, `duration_ms`, `detail`. Các bước: `ORDER_CREATED` → `PAYMENT` → `POLICY_ISSUANCE` → `NOTIFICATION`, hoặc `PROCESSING_FAILED`.
 
@@ -177,7 +178,7 @@ Thử nhanh (PowerShell):
 Invoke-RestMethod -Method Post -Uri http://localhost:8080/api/v1/orders -ContentType 'application/json' -Body '{"partner_order_id":"P-1001","customer_name":"Nguyen Van A","phone":"0901234567","amount":500000,"mode":"RABBITMQ_RPC"}'
 ```
 
-**Postman:** mở Postman, chọn **Import**, chọn file `postman/insurance-sandbox.postman_collection.json`, rồi chạy cả collection theo thứ tự (Run collection). Nếu máy có Node, chạy được không cần Postman: `npx newman run postman\insurance-sandbox.postman_collection.json` (đã chạy 2026-09-28: 6 request, 7 assertion, 0 lỗi).
+**Postman:** mở Postman, chọn **Import**, chọn file `postman/insurance-sandbox.postman_collection.json`, rồi chạy cả collection theo thứ tự (Run collection). Nếu máy có Node, chạy được không cần Postman: `npx newman run postman\insurance-sandbox.postman_collection.json` (đã chạy 2026-09-28: 7 request, 9 assertion, 0 lỗi).
 
 Muốn thấy timeout: chạy `docker compose stop payment-service` rồi gửi đơn mới. Sau khoảng 3 giây sẽ nhận `PROCESSING_FAILED`, và request hết hạn nằm trong `payment.rpc.request.dlq` trên RabbitMQ UI (`:15672`).
 
@@ -391,7 +392,7 @@ Web UI (nginx :3000) ──/api──► Order Service :8080 ──┬── Lu�
                                     └── MySQL (order_db | payment_db | policy_db, mỗi service một schema)
 ```
 
-- **Quyết định thiết kế D1–D20** (bản đầy đủ, tiếng Anh): [`docs/design-decisions.md`](docs/design-decisions.md)
+- **Quyết định thiết kế D1–D21** (bản đầy đủ, tiếng Anh): [`docs/design-decisions.md`](docs/design-decisions.md)
 - **Sơ đồ sequence chi tiết** (gồm cả nhánh lỗi: timeout, trùng request, gửi lại event, DLQ): [`docs/sequence-diagrams.md`](docs/sequence-diagrams.md)
 - **Các trường hợp xấu và cách xử lý (F1–F32), khung service:** [`docs/implementation-plan.md`](docs/implementation-plan.md)
 - **Hợp đồng:** [`contracts/payment.proto`](contracts/payment.proto) (gRPC); JSON Schemas trong [`contracts/schemas/`](contracts/schemas): message RabbitMQ (`*-rpc-*.schema.json`), envelope Kafka (`event-envelope.schema.json`) và hai event `payment-recorded.schema.json`, `policy-issued.schema.json`.
@@ -413,11 +414,11 @@ scripts/            run-tests.ps1
 
 ## Quyết định thiết kế chính
 
-Đề bài có một số điểm mâu thuẫn hoặc để ngỏ. Các quyết định dưới đây là có chủ đích; bản đầy đủ D1–D20 nằm ở [`docs/design-decisions.md`](docs/design-decisions.md).
+Đề bài có một số điểm mâu thuẫn hoặc để ngỏ. Các quyết định dưới đây là có chủ đích; bản đầy đủ D1–D21 nằm ở [`docs/design-decisions.md`](docs/design-decisions.md).
 
 - **Cache-aside, xóa key khi trạng thái đổi (D1):** để lần xem đầu hiện `CACHE MISS (DB)` và lần refresh hiện `CACHE HIT (REDIS)`, đúng yêu cầu demo. Chi tiết ở mục Ngày 4 bên dưới.
 - **`partner_transaction_id = TXN-{partner_order_id}` (D2):** chống gạch nợ trùng thêm một lớp ở Payment.
-- **Request trùng trả `200` kèm kết quả cũ (D4); request trùng đến đồng thời trả `409` (D11).**
+- **Request trùng `partner_order_id` bị chặn bằng `409` theo yêu cầu của lead (D21):** request hợp lệ đầu tiên được giữ; request sau giống hệt thì trả `409 DUPLICATE_ORDER` (kèm `order_id` gốc), khác dữ liệu thì trả `409 DUPLICATE_ORDER_MISMATCH`; trùng đến đồng thời trả `409 ORDER_IN_PROGRESS` (D11). Khác với đề V.1 ("trả về kết quả cũ"), nên response vẫn trỏ về đơn gốc và UI hiển thị đơn gốc.
 - **Chống trùng khi consume Kafka bằng `consumer_inbox` và `UNIQUE(order_id)` (D10):** Kafka gửi lại event cũng không sinh hợp đồng thứ hai.
 - **RPC timeout 3s, message tự hết hạn và vào DLQ (D7).**
 

@@ -1,7 +1,6 @@
 package com.sandbox.order.flow;
 
 import java.util.List;
-import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 
 import org.junit.jupiter.api.BeforeEach;
@@ -23,6 +22,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import com.sandbox.order.cache.IdempotencyStore;
 import com.sandbox.order.order.NewOrder;
 import com.sandbox.order.order.OrderMode;
+import com.sandbox.order.order.OrderStatus;
 import com.sandbox.order.support.Concurrently;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -76,17 +76,55 @@ class RedisIdempotencyIntegrationTests {
 	}
 
 	@Test
-	void repeatedPartnerOrderIdIsAnsweredFromTheRedisKey(CapturedOutput output) {
+	void newPartnerOrderIdIsNotADuplicate() {
+		this.intake.rejectDuplicate(command("P-FRESH"), OrderMode.GRPC_KAFKA, System.nanoTime());
+	}
+
+	@Test
+	void identicalRepeatIsRefusedFromTheRedisKeyAndPointsToTheStoredOrder(CapturedOutput output) {
 		NewOrder order = newOrder("P-DUP");
 		this.intake.insert(order, System.nanoTime());
 
-		Optional<OrderResult> replay = this.intake.replay("P-DUP", System.nanoTime());
+		assertThatExceptionOfType(DuplicateOrderException.class)
+			.isThrownBy(() -> this.intake.rejectDuplicate(command("P-DUP"), OrderMode.GRPC_KAFKA, System.nanoTime()))
+			.satisfies((ex) -> {
+				assertThat(ex.mismatch()).isFalse();
+				assertThat(ex.orderId()).isEqualTo(order.orderId());
+				assertThat(ex.orderStatus()).isEqualTo(OrderStatus.CREATED);
+			});
+		assertThat(output).contains("\"action\":\"duplicate_order_rejected\"", "\"idempotency_source\":\"REDIS\"");
+	}
 
-		assertThat(replay).hasValueSatisfying((result) -> {
-			assertThat(result.idempotentReplay()).isTrue();
-			assertThat(result.order().orderId()).isEqualTo(order.orderId());
-		});
-		assertThat(output).contains("\"action\":\"idempotent_replay\"", "\"idempotency_source\":\"REDIS\"");
+	@Test
+	void repeatWithAnyDifferentFieldIsAMismatch(CapturedOutput output) {
+		this.intake.insert(newOrder("P-MIS"), System.nanoTime());
+		PlaceOrderCommand same = command("P-MIS");
+		List<PlaceOrderCommand> changed = List.of(
+				new PlaceOrderCommand("P-MIS", "Nguyễn Văn B", same.phone(), same.amount()),
+				new PlaceOrderCommand("P-MIS", same.customerName(), "0909999999", same.amount()),
+				new PlaceOrderCommand("P-MIS", same.customerName(), same.phone(), 999_000));
+
+		for (PlaceOrderCommand command : changed) {
+			assertThatExceptionOfType(DuplicateOrderException.class)
+				.isThrownBy(() -> this.intake.rejectDuplicate(command, OrderMode.GRPC_KAFKA, System.nanoTime()))
+				.satisfies((ex) -> assertThat(ex.mismatch()).as(command.toString()).isTrue());
+		}
+		assertThatExceptionOfType(DuplicateOrderException.class).as("other mode")
+			.isThrownBy(() -> this.intake.rejectDuplicate(same, OrderMode.RABBITMQ_RPC, System.nanoTime()))
+			.satisfies((ex) -> assertThat(ex.mismatch()).isTrue());
+		assertThat(output).contains("\"mismatched_fields\":\"customer_name\"", "\"mismatched_fields\":\"phone\"",
+				"\"mismatched_fields\":\"amount\"", "\"mismatched_fields\":\"mode\"")
+			.as("customer data is not logged").doesNotContain("0909999999", "Nguyễn Văn B");
+	}
+
+	@Test
+	void partnerOrderIdInOtherCaseFoundByMysqlIsAMismatch() {
+		// Redis keys are case-sensitive, MySQL's utf8mb4_unicode_ci UNIQUE index is not.
+		this.intake.insert(newOrder("P-CASE"), System.nanoTime());
+
+		assertThatExceptionOfType(DuplicateOrderException.class)
+			.isThrownBy(() -> this.intake.rejectDuplicate(command("p-case"), OrderMode.GRPC_KAFKA, System.nanoTime()))
+			.satisfies((ex) -> assertThat(ex.mismatch()).isTrue());
 	}
 
 	@Test
@@ -95,7 +133,7 @@ class RedisIdempotencyIntegrationTests {
 		this.redisTemplate.opsForValue().set("idempotency:order:P-FLIGHT", "ORD-IN-FLIGHT");
 
 		assertThatExceptionOfType(OrderConflictException.class)
-			.isThrownBy(() -> this.intake.replay("P-FLIGHT", System.nanoTime()));
+			.isThrownBy(() -> this.intake.rejectDuplicate(command("P-FLIGHT"), OrderMode.GRPC_KAFKA, System.nanoTime()));
 	}
 
 	@Test
@@ -135,13 +173,17 @@ class RedisIdempotencyIntegrationTests {
 		assertThat(this.redisTemplate.hasKey("idempotency:order:P-RETRY"))
 			.as("the losing claim was released").isFalse();
 		// And the partner_order_id is still recognised through MySQL.
-		assertThat(this.intake.replay("P-RETRY", System.nanoTime()))
-			.hasValueSatisfying((result) -> assertThat(result.order().orderId()).isEqualTo(first.orderId()));
+		assertThatExceptionOfType(DuplicateOrderException.class)
+			.isThrownBy(() -> this.intake.rejectDuplicate(command("P-RETRY"), OrderMode.GRPC_KAFKA, System.nanoTime()))
+			.satisfies((ex) -> assertThat(ex.orderId()).isEqualTo(first.orderId()));
 	}
 
 	private NewOrder newOrder(String partnerOrderId) {
-		return this.intake.newOrder(new PlaceOrderCommand(partnerOrderId, "Nguyễn Văn A", "0901234567", 500_000),
-				OrderMode.GRPC_KAFKA);
+		return this.intake.newOrder(command(partnerOrderId), OrderMode.GRPC_KAFKA);
+	}
+
+	private static PlaceOrderCommand command(String partnerOrderId) {
+		return new PlaceOrderCommand(partnerOrderId, "Nguyễn Văn A", "0901234567", 500_000);
 	}
 
 }

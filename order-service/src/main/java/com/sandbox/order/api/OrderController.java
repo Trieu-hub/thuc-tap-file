@@ -18,12 +18,12 @@ import org.springframework.web.bind.annotation.RestController;
 
 import com.sandbox.order.cache.OrderReadCache;
 import com.sandbox.order.flow.GrpcKafkaOrderFlow;
-import com.sandbox.order.flow.OrderResult;
 import com.sandbox.order.flow.RabbitRpcOrderFlow;
 import com.sandbox.order.order.OrderMode;
 import com.sandbox.order.order.OrderNotFoundException;
 import com.sandbox.order.order.OrderRepository;
 import com.sandbox.order.order.OrderStatus;
+import com.sandbox.order.order.OrderView;
 
 @RestController
 @RequestMapping("/api/v1/orders")
@@ -54,19 +54,17 @@ class OrderController {
 	/**
 	 * RABBITMQ_RPC: 200 with ISSUED or PROCESSING_FAILED. GRPC_KAFKA: 202 once the payment is recorded
 	 * (the policy follows asynchronously), 200 with PROCESSING_FAILED when the gRPC call failed. A
-	 * duplicate partner_order_id is always 200 with the stored order (D4).
+	 * repeated partner_order_id is refused with 409 by {@link ApiExceptionHandler} (D21).
 	 */
 	@PostMapping
 	ResponseEntity<OrderResponse> create(@Valid @RequestBody CreateOrderRequest request) {
 		if (request.mode() == OrderMode.RABBITMQ_RPC) {
-			OrderResult result = this.rabbitRpcFlow.place(request.toCommand());
-			return ResponseEntity.ok(OrderResponse.created(result.order(), result.idempotentReplay()));
+			return ResponseEntity.ok(OrderResponse.created(this.rabbitRpcFlow.place(request.toCommand())));
 		}
-		OrderResult result = this.grpcKafkaFlow.place(request.toCommand());
+		OrderView order = this.grpcKafkaFlow.place(request.toCommand());
 		// 202 = accepted, still in progress: the client polls GET /api/v1/orders/{id} until ISSUED.
-		boolean accepted = !result.idempotentReplay() && result.order().status() != OrderStatus.PROCESSING_FAILED;
-		return ResponseEntity.status(accepted ? HttpStatus.ACCEPTED : HttpStatus.OK)
-			.body(OrderResponse.created(result.order(), result.idempotentReplay()));
+		boolean accepted = order.status() != OrderStatus.PROCESSING_FAILED;
+		return ResponseEntity.status(accepted ? HttpStatus.ACCEPTED : HttpStatus.OK).body(OrderResponse.created(order));
 	}
 
 	/**
