@@ -1,7 +1,5 @@
 package com.sandbox.order.flow;
 
-import java.util.Optional;
-
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
@@ -61,12 +59,10 @@ public class RabbitRpcOrderFlow {
 		this.notifications = notifications;
 	}
 
-	public OrderResult place(PlaceOrderCommand command) {
+	/** @throws DuplicateOrderException when the partner_order_id already has an order (D21) */
+	public OrderView place(PlaceOrderCommand command) {
 		long start = System.nanoTime();
-		Optional<OrderResult> replay = this.intake.replay(command.partnerOrderId(), start);
-		if (replay.isPresent()) {
-			return replay.get();
-		}
+		this.intake.rejectDuplicate(command, OrderMode.RABBITMQ_RPC, start);
 		NewOrder order = this.intake.newOrder(command, OrderMode.RABBITMQ_RPC);
 		MDC.put("correlation_id", order.correlationId());
 		try {
@@ -80,7 +76,7 @@ public class RabbitRpcOrderFlow {
 				.addKeyValue("status", result.status().name())
 				.addKeyValue("execution_time_ms", elapsedMs(start))
 				.log("Order processed");
-			return new OrderResult(result, false);
+			return result;
 		}
 		finally {
 			MDC.remove("correlation_id");

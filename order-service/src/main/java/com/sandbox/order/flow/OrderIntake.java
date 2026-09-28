@@ -3,6 +3,8 @@ package com.sandbox.order.flow;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.UUID;
@@ -23,8 +25,8 @@ import com.sandbox.order.order.TimelineEntry;
 import com.sandbox.order.order.TimelineStep;
 
 /**
- * The first steps shared by both flows, before any transport is involved: return the stored order
- * for a repeated partner_order_id (D4), otherwise generate the identifiers and insert the order as
+ * The first steps shared by both flows, before any transport is involved: refuse a repeated
+ * partner_order_id with 409 (D21), otherwise generate the identifiers and insert the order as
  * CREATED, answering 409 when an identical request won the insert (D11). Kept in one place so the
  * two flows cannot drift apart on idempotency.
  * <p>
@@ -48,39 +50,77 @@ class OrderIntake {
 	}
 
 	/**
-	 * The stored order as an idempotent replay, or empty when this partner_order_id is new.
+	 * Refuses a repeated partner_order_id (D21): the first valid request keeps it, a later one gets
+	 * 409 DUPLICATE_ORDER when all five fields match the stored order and 409
+	 * DUPLICATE_ORDER_MISMATCH otherwise. Returns normally for a new partner_order_id.
+	 * @throws DuplicateOrderException when an order with this partner_order_id exists
 	 * @throws OrderConflictException when the key is claimed but its order is not written yet (D11)
 	 */
-	Optional<OrderResult> replay(String partnerOrderId, long startNanos) {
-		Optional<String> knownOrderId = this.idempotency.find(partnerOrderId);
+	void rejectDuplicate(PlaceOrderCommand command, OrderMode mode, long startNanos) {
+		Optional<String> knownOrderId = this.idempotency.find(command.partnerOrderId());
 		if (knownOrderId.isPresent()) {
 			Optional<OrderView> order = this.orders.findById(knownOrderId.get());
 			if (order.isEmpty()) {
-				// Claimed by an identical request whose order row is not committed yet.
-				throw conflict(partnerOrderId);
+				// Claimed by a request whose order row is not committed yet: nothing to compare with.
+				throw conflict(command.partnerOrderId());
 			}
-			return Optional.of(replay(order.get(), "REDIS", startNanos));
+			throw duplicate(order.get(), command, mode, "REDIS", startNanos);
 		}
 		// No key: a new partner_order_id, a key older than 24 h, or Redis down. MySQL decides.
-		return this.orders.findByPartnerOrderId(partnerOrderId).map((order) -> replay(order, "MYSQL", startNanos));
+		Optional<OrderView> order = this.orders.findByPartnerOrderId(command.partnerOrderId());
+		if (order.isPresent()) {
+			throw duplicate(order.get(), command, mode, "MYSQL", startNanos);
+		}
 	}
 
-	private OrderResult replay(OrderView order, String foundIn, long startNanos) {
+	private DuplicateOrderException duplicate(OrderView order, PlaceOrderCommand command, OrderMode mode,
+			String foundIn, long startNanos) {
+		List<String> mismatched = mismatchedFields(order, command, mode);
+		boolean mismatch = !mismatched.isEmpty();
+		// The stored order's correlation_id, so the refusal shows up when tracing the original order.
 		MDC.put("correlation_id", order.correlationId());
 		try {
-			log.atInfo()
-				.addKeyValue("transport", "HTTP")
-				.addKeyValue("action", "idempotent_replay")
+			var event = (mismatch ? log.atWarn() : log.atInfo()).addKeyValue("transport", "HTTP")
+				.addKeyValue("action", mismatch ? "duplicate_order_mismatch" : "duplicate_order_rejected")
 				.addKeyValue("order_id", order.orderId())
-				.addKeyValue("status", order.status().name())
+				.addKeyValue("status", mismatch ? "DUPLICATE_ORDER_MISMATCH" : "DUPLICATE_ORDER")
 				.addKeyValue("idempotency_source", foundIn)
-				.addKeyValue("execution_time_ms", elapsedMs(startNanos))
-				.log("Duplicate partner_order_id, returning the stored order");
-			return new OrderResult(order, true);
+				.addKeyValue("execution_time_ms", elapsedMs(startNanos));
+			if (mismatch) {
+				// Field names only: the values are customer data.
+				event = event.addKeyValue("mismatched_fields", String.join(",", mismatched));
+			}
+			event.log(mismatch ? "partner_order_id reused with different data, request refused"
+					: "Duplicate partner_order_id, request refused");
+			return new DuplicateOrderException(order, mismatch);
 		}
 		finally {
 			MDC.remove("correlation_id");
 		}
+	}
+
+	/**
+	 * The request fields that differ from the stored order, compared exactly. partner_order_id is
+	 * compared too: MySQL finds it case-insensitively (utf8mb4_unicode_ci), Redis does not.
+	 */
+	static List<String> mismatchedFields(OrderView order, PlaceOrderCommand command, OrderMode mode) {
+		List<String> fields = new ArrayList<>();
+		if (!order.partnerOrderId().equals(command.partnerOrderId())) {
+			fields.add("partner_order_id");
+		}
+		if (!order.customerName().equals(command.customerName())) {
+			fields.add("customer_name");
+		}
+		if (!order.phone().equals(command.phone())) {
+			fields.add("phone");
+		}
+		if (order.amount() != command.amount()) {
+			fields.add("amount");
+		}
+		if (order.mode() != mode) {
+			fields.add("mode");
+		}
+		return fields;
 	}
 
 	NewOrder newOrder(PlaceOrderCommand command, OrderMode mode) {

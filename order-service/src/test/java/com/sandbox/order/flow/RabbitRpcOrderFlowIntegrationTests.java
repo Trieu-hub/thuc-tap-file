@@ -104,7 +104,6 @@ class RabbitRpcOrderFlowIntegrationTests {
 		assertThat(body.path("order_id").asString()).matches("ORD-\\d{8}-[0-9A-F]{8}");
 		assertThat(body.path("status").asString()).isEqualTo("ISSUED");
 		assertThat(body.path("policy_number").asString()).startsWith("ACBI-");
-		assertThat(body.path("idempotent_replay").asBoolean()).isFalse();
 		assertThat(steps(body)).containsExactly("ORDER_CREATED", "PAYMENT", "POLICY_ISSUANCE", "NOTIFICATION");
 		assertThat(body.path("timeline").valueStream()).allMatch((step) -> step.path("duration_ms").isNumber());
 		// The business id reached both services in the x-correlation-id header, not only in the response.
@@ -170,25 +169,32 @@ class RabbitRpcOrderFlowIntegrationTests {
 	}
 
 	@Test
-	void duplicatePartnerOrderIdReturnsOriginalOrderWithoutNewRpc() throws Exception {
+	void repeatedPartnerOrderIdIsRefusedWith409WithoutNewRpc() throws Exception {
 		JsonNode first = json(post(order("P-DUP")));
-		HttpResponse<String> second = post(order("P-DUP"));
+		HttpResponse<String> identical = post(order("P-DUP"));
+		HttpResponse<String> otherAmount = post(order("P-DUP").replace("500000", "999000"));
 
-		assertThat(second.statusCode()).isEqualTo(200);
-		JsonNode replay = json(second);
-		assertThat(replay.path("order_id").asString()).isEqualTo(first.path("order_id").asString());
-		assertThat(replay.path("correlation_id").asString()).isEqualTo(first.path("correlation_id").asString());
-		assertThat(replay.path("status").asString()).isEqualTo("ISSUED");
-		assertThat(replay.path("idempotent_replay").asBoolean()).isTrue();
+		assertThat(identical.statusCode()).isEqualTo(409);
+		JsonNode duplicate = json(identical);
+		assertThat(duplicate.path("error").asString()).isEqualTo("DUPLICATE_ORDER");
+		assertThat(duplicate.path("order_id").asString()).isEqualTo(first.path("order_id").asString());
+		assertThat(duplicate.path("order_status").asString()).isEqualTo("ISSUED");
+		assertThat(otherAmount.statusCode()).isEqualTo(409);
+		JsonNode mismatch = json(otherAmount);
+		assertThat(mismatch.path("error").asString()).isEqualTo("DUPLICATE_ORDER_MISMATCH");
+		assertThat(mismatch.has("order_id")).as("nothing about the stored order").isFalse();
+		// The first valid request keeps the partner_order_id: no second payment, no second policy.
 		assertThat(this.payment.calls).hasValue(1);
 		assertThat(this.policy.calls).hasValue(1);
+		assertThat(this.jdbc.queryForObject("SELECT amount FROM orders WHERE partner_order_id = 'P-DUP'", Long.class))
+			.isEqualTo(500_000L);
 	}
 
 	@Test
 	void concurrentDuplicatesCreateOneOrderAndLosersGetConflict() throws Exception {
 		List<Integer> statuses = Concurrently.run(4, () -> post(order("P-RACE")).statusCode());
 
-		assertThat(statuses).allMatch((status) -> status == 200 || status == 409).contains(200);
+		assertThat(statuses).containsOnlyOnce(200).containsOnly(200, 409);
 		assertThat(this.jdbc.queryForObject("SELECT COUNT(*) FROM orders", Integer.class)).isEqualTo(1);
 		assertThat(this.payment.calls).hasValue(1);
 	}

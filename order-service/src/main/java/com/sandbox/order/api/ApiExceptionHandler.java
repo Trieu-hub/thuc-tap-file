@@ -15,8 +15,10 @@ import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
+import com.sandbox.order.flow.DuplicateOrderException;
 import com.sandbox.order.flow.OrderConflictException;
 import com.sandbox.order.order.OrderNotFoundException;
+import com.sandbox.order.order.OrderStatus;
 
 /** One JSON error shape for every API error, with the offending fields named as on the wire. */
 @RestControllerAdvice
@@ -50,6 +52,21 @@ class ApiExceptionHandler {
 		return error(HttpStatus.CONFLICT, "ORDER_IN_PROGRESS", ex.getMessage(), List.of());
 	}
 
+	/**
+	 * A repeated partner_order_id (D21). An identical request gets the stored order's id and status,
+	 * so the caller can still read the original result with GET; a request with different data gets
+	 * nothing about the stored order.
+	 */
+	@ExceptionHandler(DuplicateOrderException.class)
+	ResponseEntity<ApiError> duplicate(DuplicateOrderException ex) {
+		if (ex.mismatch()) {
+			return error(HttpStatus.CONFLICT, "DUPLICATE_ORDER_MISMATCH", ex.getMessage(), List.of());
+		}
+		return ResponseEntity.status(HttpStatus.CONFLICT)
+			.body(new ApiError(HttpStatus.CONFLICT.value(), "DUPLICATE_ORDER", ex.getMessage(), List.of(),
+					ex.orderId(), ex.orderStatus()));
+	}
+
 	@ExceptionHandler(OrderNotFoundException.class)
 	ResponseEntity<ApiError> notFound(OrderNotFoundException ex) {
 		return error(HttpStatus.NOT_FOUND, "ORDER_NOT_FOUND", ex.getMessage(), List.of());
@@ -57,7 +74,8 @@ class ApiExceptionHandler {
 
 	private static ResponseEntity<ApiError> error(HttpStatus status, String code, String message,
 			List<FieldViolation> violations) {
-		return ResponseEntity.status(status).body(new ApiError(status.value(), code, message, violations));
+		return ResponseEntity.status(status)
+			.body(new ApiError(status.value(), code, message, violations, null, null));
 	}
 
 	/** Bean Validation reports Java names (partnerOrderId); clients sent partner_order_id. */
@@ -66,7 +84,9 @@ class ApiExceptionHandler {
 	}
 
 	record ApiError(int status, String error, String message,
-			@JsonInclude(JsonInclude.Include.NON_EMPTY) List<FieldViolation> errors) {
+			@JsonInclude(JsonInclude.Include.NON_EMPTY) List<FieldViolation> errors,
+			@JsonInclude(JsonInclude.Include.NON_NULL) String orderId,
+			@JsonInclude(JsonInclude.Include.NON_NULL) OrderStatus orderStatus) {
 
 	}
 
