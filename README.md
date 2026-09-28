@@ -34,7 +34,12 @@ Kèm theo: Redis (idempotency và cache), log JSON có `correlation_id` xuyên s
   - Web UI tại http://localhost:3000: form tạo đơn, chọn luồng, timeline 4 bước, Correlation ID, Cache Status, nút gửi lại request trùng, polling cho Luồng 2 (xem [Demo trên Web UI](#demo-trên-web-ui)).
   - Redis: key chống trùng `idempotency:order:{partner_order_id}` (24 giờ) và cache đọc `order:{order_id}` (10 phút). Redis chết thì hệ thống vẫn chạy bằng MySQL.
   - Log JSON của cả 3 service có `transport` ở mọi dòng, log `GET` có `cache_hit`, và một lệnh là truy vết được một đơn qua 3 service.
-- **Chưa làm:** kiểm thử các kịch bản ngoại lệ trên UI, hoàn thiện README và tập dượt demo (Ngày 5).
+- **Ngày 5 đã xong: kịch bản ngoại lệ, script demo, báo cáo:**
+  - Kịch bản ngoại lệ chạy thật bằng PowerShell 5.1: timeout và DLQ RabbitMQ, message hỏng vào DLQ, Kafka gửi lại event và DLT (xem [Kịch bản ngoại lệ (Ngày 5)](#kịch-bản-ngoại-lệ-ngày-5)).
+  - Chặn request trùng bằng `409 DUPLICATE_ORDER` / `409 DUPLICATE_ORDER_MISMATCH` theo yêu cầu của lead (D21).
+  - Script demo `scripts/demo.ps1` (`. .\scripts\demo.ps1` rồi `demo`) và kịch bản [`docs/demo-guide.md`](docs/demo-guide.md).
+  - Báo cáo bài tập: [`docs/report.md`](docs/report.md). Postman collection: `postman/`.
+- **Buổi demo nghiệm thu:** dự kiến `<ngày>`.
 
 ---
 
@@ -102,7 +107,14 @@ Dùng `scripts\run-tests.ps1` thay cho `mvn -B package`:
 
 ## Demo trên Web UI
 
-Mở http://localhost:3000 sau khi chạy `docker compose up -d --wait`. Ảnh dưới đây chụp ngày 2026-09-26 trên sandbox đang chạy.
+Mở http://localhost:3000 sau khi chạy `docker compose up -d --wait`. Ảnh dưới đây chụp ngày 2026-09-26 trên sandbox đang chạy (ảnh 4 chụp lại ngày 2026-09-28).
+
+**Kịch bản demo nghiệm thu đầy đủ** (thứ tự, lời nói, kết quả mong đợi, xử lý sự cố): [`docs/demo-guide.md`](docs/demo-guide.md). Mọi bước có lệnh sẵn trong Windows PowerShell:
+
+```powershell
+. .\scripts\demo.ps1   # nạp một lần, đứng ở thư mục gốc của repo
+demo                   # danh sách bước; demo 3 = chạy bước 3; demo all = tập dượt, dừng chờ Enter sau mỗi bước
+```
 
 **1. Luồng 2: `202 Accepted`, UI polling.** Payment đã ghi nhận qua gRPC; 2 bước sau đang chờ Kafka:
 
