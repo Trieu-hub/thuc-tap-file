@@ -177,6 +177,8 @@ Thử nhanh (PowerShell):
 Invoke-RestMethod -Method Post -Uri http://localhost:8080/api/v1/orders -ContentType 'application/json' -Body '{"partner_order_id":"P-1001","customer_name":"Nguyen Van A","phone":"0901234567","amount":500000,"mode":"RABBITMQ_RPC"}'
 ```
 
+**Postman:** mở Postman, chọn **Import**, chọn file `postman/insurance-sandbox.postman_collection.json`, rồi chạy cả collection theo thứ tự (Run collection). Nếu máy có Node, chạy được không cần Postman: `npx newman run postman\insurance-sandbox.postman_collection.json` (đã chạy 2026-09-28: 6 request, 7 assertion, 0 lỗi).
+
 Muốn thấy timeout: chạy `docker compose stop payment-service` rồi gửi đơn mới. Sau khoảng 3 giây sẽ nhận `PROCESSING_FAILED`, và request hết hạn nằm trong `payment.rpc.request.dlq` trên RabbitMQ UI (`:15672`).
 
 ### Thử Luồng 2 và polling (PowerShell, một dòng)
