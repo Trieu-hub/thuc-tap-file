@@ -67,6 +67,7 @@
     - `payment.partner_transaction_id`
     - `policy.order_id`
     - `consumer_inbox.event_id` in each consuming service
+  - `policy_db` has only the Flyway migration V1, because `UNIQUE(order_id)` on `policies` and the `consumer_inbox` table were already in V1. A V2 exists only where a constraint had to be added later: `order_db` (`UNIQUE(order_id, step)` on `order_timeline`) and `payment_db` (`UNIQUE(order_id)` on `payments`).
   - Write the inbox row and the business row in **one `@Transactional` method**. A duplicate-key violation (`DataIntegrityViolationException`) means "already processed", which logs `duplicate_event_ignored` and then acks. Do not rely on a read-then-insert check alone.
   - MySQL starts slowly, so services must wait on its healthcheck.
 
