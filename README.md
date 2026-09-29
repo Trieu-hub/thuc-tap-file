@@ -1,0 +1,474 @@
+# Insurance Sandbox: RabbitMQ RPC vs gRPC + Kafka
+
+Bài tập thực tập 5 ngày: mô phỏng luồng phát hành bảo hiểm **Tạo đơn → Thanh toán → Phát hành hợp đồng → Thông báo → Cập nhật UI** trên 3 microservice. Mục đích là so sánh hai cách giao tiếp:
+
+| | Luồng 1: `RABBITMQ_RPC` | Luồng 2: `GRPC_KAFKA` |
+|---|---|---|
+| Order → Payment | RabbitMQ RPC (`reply_to` + `correlation_id`) | gRPC `RecordPayment` (HTTP/2 + Protobuf) |
+| Payment → Policy | Order gọi RPC sang Policy | Event Kafka `payment.recorded` |
+| Policy → Order | Reply RPC | Event Kafka `policy.issued` |
+| Phản hồi HTTP | `200 OK`, chờ tới khi `ISSUED` (đồng bộ) | `202 Accepted` với `PAYMENT_RECORDED`, UI polling tới `ISSUED` (bất đồng bộ) |
+
+Kèm theo: Redis (idempotency và cache), log JSON có `correlation_id` xuyên suốt, DLQ, chống trùng khi consume Kafka.
+
+> **Đề bài gốc:** [`intern-messaging-grpc-kafka-assignment.md`](intern-messaging-grpc-kafka-assignment.md).
+> **Thay đổi stack:** đề ghi .NET 10 / ASP.NET Core. Dự án dùng **Java 21 + Spring Boot 4.1** và **MySQL 8** thay cho Postgres/SQLite, **đã được anh lead đồng ý**.
+
+---
+
+## Trạng thái
+
+- **Ngày 1 đã xong:** hạ tầng và khung 3 service chạy được bằng một lệnh, mọi container `healthy`.
+- **Ngày 2 đã xong: Luồng 1 (`RABBITMQ_RPC`) chạy thông qua 3 service:**
+  - RPC qua `payment.rpc.request` và `policy.rpc.request`, dùng Direct Reply-to.
+  - Timeout 3 giây: trả `PROCESSING_FAILED`, HTTP không treo.
+  - Queue có TTL 3 giây, message hết hạn hoặc bị lỗi sẽ vào DLQ.
+  - `correlation_id` được truyền qua header `x-correlation-id` và có trong log của cả 3 service.
+- **Ngày 3 đã xong: Luồng 2 (`GRPC_KAFKA`) chạy thông qua 3 service:**
+  - Order gọi Payment bằng gRPC `RecordPayment` (cổng 9090), deadline 3 giây cho mỗi lần gọi, rồi trả ngay `202 Accepted` với `PAYMENT_RECORDED`.
+  - Payment publish `payment.recorded`, Policy phát hành hợp đồng rồi publish `policy.issued`, Order cập nhật đơn thành `ISSUED` và chạy bước thông báo (mô phỏng). Client polling `GET /api/v1/orders/{id}`.
+  - Chống trùng khi consume: `consumer_inbox` theo `event_id` (Policy và Order) và `UNIQUE(order_id)` trên bảng hợp đồng. Event gửi lại không sinh hợp đồng thứ hai, log `duplicate_event_ignored`.
+  - Offset chỉ được commit sau khi transaction DB đã commit. Event lỗi được thử lại 3 lần rồi vào `<topic>.DLT`; event không đọc được thì vào DLT ngay.
+  - `correlation_id` đi qua metadata gRPC `x-correlation-id` và trường `correlation_id` của envelope Kafka.
+- **Ngày 4 đã xong: Web UI, Redis, log chuẩn hóa:**
+  - Web UI tại http://localhost:3000: form tạo đơn, chọn luồng, timeline 4 bước, Correlation ID, Cache Status, nút gửi lại request trùng, polling cho Luồng 2 (xem [Demo trên Web UI](#demo-trên-web-ui)).
+  - Redis: key chống trùng `idempotency:order:{partner_order_id}` (24 giờ) và cache đọc `order:{order_id}` (10 phút). Redis chết thì hệ thống vẫn chạy bằng MySQL.
+  - Log JSON của cả 3 service có `transport` ở mọi dòng, log `GET` có `cache_hit`, và một lệnh là truy vết được một đơn qua 3 service.
+- **Ngày 5 đã xong: kịch bản ngoại lệ, script demo, báo cáo:**
+  - Kịch bản ngoại lệ chạy thật bằng PowerShell 5.1: timeout và DLQ RabbitMQ, message hỏng vào DLQ, Kafka gửi lại event và DLT (xem [Kịch bản ngoại lệ (Ngày 5)](#kịch-bản-ngoại-lệ-ngày-5)).
+  - Chặn request trùng bằng `409 DUPLICATE_ORDER` / `409 DUPLICATE_ORDER_MISMATCH` theo yêu cầu của lead (D21).
+  - Script demo `scripts/demo.ps1` (`. .\scripts\demo.ps1` rồi `demo`) và kịch bản [`docs/demo-guide.md`](docs/demo-guide.md).
+  - Báo cáo bài tập: [`docs/report.md`](docs/report.md). Postman collection: `postman/`.
+- **Buổi demo nghiệm thu:** dự kiến `<ngày>`.
+
+---
+
+## Chạy dự án
+
+**Yêu cầu:** Docker Desktop (đang chạy). Để build ngoài Docker cần thêm JDK 21 và Maven 3.9.
+
+```powershell
+docker compose up --build -d --wait   # sau khi đổi code: build 3 image + khởi động, trả về khi mọi service healthy
+docker compose up -d --wait           # code không đổi: không build, giữ nguyên container đang chạy
+docker compose ps                     # mọi service (trừ ui) phải ở trạng thái (healthy)
+```
+
+Thời gian (đo ngày 2026-09-26):
+- `up --build` sau khi đổi code: khoảng 2–2,5 phút. Cả 3 image dùng chung **một** lần build Maven (`docker/service.Dockerfile`). Trước đây mỗi image tự build riêng và phải chờ nhau, mất khoảng 8,7 phút.
+- `up -d --wait` khi sandbox đang chạy: khoảng 3 giây.
+
+**Chỉ dùng `--build` khi code thay đổi.** Kể cả khi mọi layer đã có trong cache, mỗi lần build Docker Desktop vẫn gắn metadata có thời gian vào image, nên image nhận ID mới. Compose khi đó tạo lại cả 3 container (khoảng 1 phút), và **log cũ bị mất**, gồm cả log đang dùng để truy vết `correlation_id` khi demo.
+
+Dừng: `docker compose down` (thêm `-v` để xóa dữ liệu MySQL).
+Kafka UI (tùy chọn): `docker compose --profile tools up -d kafka-ui`.
+
+### Địa chỉ
+
+| Thành phần | URL / cổng |
+|---|---|
+| Web UI | http://localhost:3000 |
+| Order Service | http://localhost:8080 (health: `/actuator/health`) |
+| Payment Service | http://localhost:8081, gRPC `:9090` (`PaymentService.RecordPayment`) |
+| Policy Service | http://localhost:8082 |
+| RabbitMQ Management | http://localhost:15672 (user/pass trong `.env`) |
+| Kafka UI (profile `tools`) | http://localhost:8090 |
+| MySQL | `localhost:3307` |
+| Redis | `localhost:6379` |
+| Kafka (từ máy host) | `localhost:9094` |
+
+### Build và test (PowerShell)
+
+| Mục đích | Lệnh | Thời gian |
+|---|---|---|
+| Khởi động để demo / test tay (code không đổi) | `docker compose up -d --wait` | khoảng 3 giây nếu đang chạy, khoảng 70 giây nếu sandbox đang dừng |
+| Khởi động sau khi đổi code | `docker compose up --build -d --wait` | khoảng 2–2,5 phút |
+| Kiểm tra code compile được, không chạy test | `mvn -B -ntp -T 1C package -DskipTests` | khoảng 10 giây (đo được 9 giây) |
+| **Chạy toàn bộ test** | `powershell -ExecutionPolicy Bypass -File scripts\run-tests.ps1` | khoảng 9 phút (đã gồm dừng và bật lại sandbox) |
+| Chạy một test class | `mvn -B -pl order-service -am test "-Dtest=GrpcWarmUpTests" "-Dsurefire.failIfNoSpecifiedTests=false"` | |
+
+Muốn demo thì **không cần chạy test**: `docker compose up --build` tự build jar bên trong Docker.
+
+Dùng `scripts\run-tests.ps1` thay cho `mvn -B package`:
+- Script tạm dừng sandbox trong lúc test rồi bật lại. Test tích hợp tự khởi động MySQL, RabbitMQ và Kafka riêng (Testcontainers); nếu chạy song song với sandbox, Docker Desktop thiếu CPU và RAM, và test đo thời gian (deadline 3 giây phải trả lời trong 2,9–3,5 giây) có thể fail. Đã gặp 1 lần: MySQL khựng 3,8 giây.
+- Script chỉ in tóm tắt từng module; log đầy đủ nằm ở `target\run-tests.log`.
+
+### Khi build hoặc khởi động bị lỗi
+
+| Hiện tượng | Nguyên nhân | Cách xử lý |
+|---|---|---|
+| `Unknown lifecycle phase ".failIfNoSpecifiedTests=false"` | PowerShell tách tham số `-D...` có dấu chấm | Đặt tham số trong nháy kép: `"-Dsurefire.failIfNoSpecifiedTests=false"` |
+| `mvn` báo thiếu class hoặc `cannot find symbol` dù code đúng, chạy lại thì hết | Java language server của Cursor/VS Code build cùng lúc vào `target/` | Đóng Cursor hoặc tắt `java.autobuild.enabled` trong lúc chạy `mvn`, rồi chạy `mvn -B clean package` |
+| Test đo thời gian fail khi sandbox đang chạy | Docker Desktop thiếu tài nguyên | Dùng `scripts\run-tests.ps1` |
+| `dependency failed to start: container ...-rabbitmq-1 exited (1)`, log có `.erlang.cookie: eacces` | Container RabbitMQ cũ bị lỗi quyền file khi khởi động lại | `docker compose up -d --force-recreate --wait rabbitmq` (RabbitMQ không có volume, không mất dữ liệu) |
+| `docker compose up --build` báo `failed to solve ... exit code: 1` | Build Maven trong Docker lỗi | Xem các dòng `[ERROR]` ngay phía trên thông báo đó (build không còn chạy ở chế độ `-q`), hoặc chạy `mvn -B -ntp -T 1C package -DskipTests` trên máy để thấy lỗi nhanh hơn |
+| PowerShell hiện `Pattern[0]:` | Lệnh dài bị ngắt dòng khi dán | Bấm `Ctrl+C` rồi dán lại cả dòng |
+
+---
+
+## Demo trên Web UI
+
+Mở http://localhost:3000 sau khi chạy `docker compose up -d --wait`. Ảnh dưới đây chụp ngày 2026-09-26 trên sandbox đang chạy (ảnh 4 chụp lại ngày 2026-09-28).
+
+**Kịch bản demo nghiệm thu đầy đủ** (thứ tự, lời nói, kết quả mong đợi, xử lý sự cố): [`docs/demo-guide.md`](docs/demo-guide.md). Mọi bước có lệnh sẵn trong Windows PowerShell:
+
+```powershell
+. .\scripts\demo.ps1   # nạp một lần, đứng ở thư mục gốc của repo
+demo                   # danh sách bước; demo 3 = chạy bước 3; demo all = tập dượt, dừng chờ Enter sau mỗi bước
+```
+
+**1. Luồng 2: `202 Accepted`, UI polling.** Payment đã ghi nhận qua gRPC; 2 bước sau đang chờ Kafka:
+
+![Luồng 2 vừa nhận 202, đang polling](docs/images/01-flow2-202-polling.jpg)
+
+**2. Polling xong: `ISSUED`, đủ 4 bước, `CACHE MISS (DB)`.** Lần GET đầu đọc MySQL:
+
+![Luồng 2 đã ISSUED, cache miss](docs/images/02-flow2-issued-cache-miss.jpg)
+
+**3. Bấm F5: `CACHE HIT (REDIS)`.** URL giữ `#order=...`, nên trang đọc lại đúng đơn đó, lần này từ Redis:
+
+![Refresh: cache hit](docs/images/03-refresh-cache-hit.jpg)
+
+**4. [Gửi lại Request trùng]:** `409 Conflict`, nhãn "Request trùng, đã chặn (409 DUPLICATE_ORDER)". Không tạo đơn mới, không trừ tiền lần 2; bên dưới vẫn hiện đơn gốc (lấy theo `order_id` trong response 409). Request trùng `partner_order_id` nhưng khác dữ liệu (ví dụ khác số tiền) bị chặn bằng `409 DUPLICATE_ORDER_MISMATCH` (D21):
+
+![Request trùng](docs/images/04-duplicate-request.jpg)
+
+**5. Payment tắt (`docker compose stop payment-service`), Luồng 2:** `200`, `PROCESSING_FAILED`, bước thất bại ghi rõ mã gRPC gốc:
+
+![Payment tắt](docs/images/05-payment-down-failed.jpg)
+
+**Truy vết một đơn qua 3 service:** mở mục "Truy vết log của đơn này qua 3 service" trên UI để lấy lệnh PowerShell có sẵn `correlation_id`. Ví dụ đầu ra thật (đơn Luồng 2, sau khi dừng rồi bật lại payment-service):
+
+```text
+timestamp                service         transport  action                 status           execution_time_ms
+2026-09-26T15:08:35.048Z payment-service gRPC       RecordPayment          RECORDED                        37
+2026-09-26T15:08:35.064Z order-service   gRPC       RecordPayment          RECORDED                       112
+2026-09-26T15:08:35.115Z order-service   HTTP       CreateOrder            PAYMENT_RECORDED               272
+2026-09-26T15:08:35.217Z order-service   HTTP       GetOrder               PAYMENT_RECORDED                26
+2026-09-26T15:08:35.745Z payment-service Kafka      PublishPaymentRecorded SUCCESS                        690
+2026-09-26T15:08:35.760Z policy-service  Kafka      IssuePolicy            ISSUED                          32
+2026-09-26T15:08:35.775Z policy-service  Kafka      PublishPolicyIssued    SUCCESS                         14
+2026-09-26T15:08:35.836Z order-service   IN_PROCESS SendNotification       SUCCESS                          0
+2026-09-26T15:08:35.836Z order-service   Kafka      ApplyPolicyIssued      ISSUED                          38
+2026-09-26T15:08:36.284Z order-service   HTTP       GetOrder               ISSUED                           8
+```
+
+**Redis được dùng ở đâu** (câu nghiệm thu số 5):
+- **Lúc tạo đơn:** key `idempotency:order:{partner_order_id}` (value là `order_id`, TTL 24 giờ) để nhận ra request trùng và chặn bằng `409` (D21).
+- **Lúc xem đơn:** `GET /api/v1/orders/{id}` đọc `order:{order_id}` (TTL 10 phút) trước khi đọc MySQL.
+
+Xem key trong Redis: `docker compose exec redis redis-cli --scan --pattern '*'` và `docker compose exec redis redis-cli TTL order:<ORDER_ID>`.
+
+## API (Order Service)
+
+| Method | Path | Kết quả |
+|---|---|---|
+| `POST` | `/api/v1/orders` | Tạo đơn và chạy Luồng 1 hoặc Luồng 2 theo `mode`. Xem bảng mã trả về bên dưới |
+| `GET` | `/api/v1/orders/{id}` | Chi tiết đơn và timeline. Đọc Redis trước, MySQL khi không có trong cache; `cache_status` là `CACHE_HIT_REDIS` hoặc `CACHE_MISS_DB`; header `X-Correlation-Id`. `404` nếu không có |
+| `GET` | `/api/v1/orders` | 100 đơn mới nhất, mới nhất trước (không kèm timeline) |
+
+Body của `POST` (JSON dùng snake_case, `amount` là số nguyên VND):
+
+```json
+{"partner_order_id": "P-1001", "customer_name": "Nguyen Van A", "phone": "0901234567", "amount": 500000, "mode": "RABBITMQ_RPC"}
+```
+
+| Mã | Luồng | Khi nào |
+|---|---|---|
+| `200` | 1 (`RABBITMQ_RPC`) | Chạy xong: `status` là `ISSUED` (có `policy_number`) hoặc `PROCESSING_FAILED` (có `failure_reason`: `PAYMENT_TIMEOUT`, `POLICY_TIMEOUT`, lý do từ Payment như `INVALID_AMOUNT`, hoặc `BROKER_UNAVAILABLE`). Chờ tối đa khoảng 6 giây (2 × 3 giây) |
+| `202` | 2 (`GRPC_KAFKA`) | Payment đã ghi nhận qua gRPC: `status = PAYMENT_RECORDED`. Hợp đồng được phát hành sau đó qua Kafka; client polling `GET /api/v1/orders/{id}` tới khi `ISSUED`. Chờ tối đa 3 giây (deadline gRPC) |
+| `200` | 2 (`GRPC_KAFKA`) | Gọi gRPC thất bại: `status = PROCESSING_FAILED`, `failure_reason` là `PAYMENT_TIMEOUT` (`DEADLINE_EXCEEDED`), `PAYMENT_SERVICE_UNAVAILABLE` (`UNAVAILABLE`), `PAYMENT_GRPC_ERROR` (mã gRPC khác) hoặc lý do từ Payment như `INVALID_AMOUNT`. Mã gRPC gốc nằm trong `detail` của timeline và trong log (`grpc_status`) |
+| `400` | cả hai | Body sai; `errors[]` liệt kê field lỗi (tên snake_case), kể cả `mode` không hợp lệ |
+| `409 DUPLICATE_ORDER` | cả hai | `partner_order_id` đã có đơn và cả 5 trường giống hệt: request bị chặn, không gọi Payment lần nữa. Body có `order_id` và `order_status` của đơn gốc (D21) |
+| `409 DUPLICATE_ORDER_MISMATCH` | cả hai | `partner_order_id` đã có đơn nhưng khác ít nhất 1 trường (`customer_name`, `phone`, `amount`, `mode`): request bị chặn, body không kèm thông tin đơn gốc (D21) |
+| `409 ORDER_IN_PROGRESS` | cả hai | Hai request trùng đến cùng lúc, đơn gốc chưa ghi xong; request thua trả 409, gửi lại sau (D11) |
+
+Response gồm `order_id` (dạng `ORD-yyyyMMdd-XXXXXXXX`), `status`, `correlation_id` (UUID), `policy_number`, `failure_reason` và `timeline[]`. Mỗi bước timeline có `step`, `service`, `transport`, `status`, `duration_ms`, `detail`. Các bước: `ORDER_CREATED` → `PAYMENT` → `POLICY_ISSUANCE` → `NOTIFICATION`, hoặc `PROCESSING_FAILED`.
+
+Thử nhanh (PowerShell):
+
+```powershell
+Invoke-RestMethod -Method Post -Uri http://localhost:8080/api/v1/orders -ContentType 'application/json' -Body '{"partner_order_id":"P-1001","customer_name":"Nguyen Van A","phone":"0901234567","amount":500000,"mode":"RABBITMQ_RPC"}'
+```
+
+**Postman:** mở Postman, chọn **Import**, chọn file `postman/insurance-sandbox.postman_collection.json`, rồi chạy cả collection theo thứ tự (Run collection). Nếu máy có Node, chạy được không cần Postman: `npx newman run postman\insurance-sandbox.postman_collection.json` (đã chạy 2026-09-28: 7 request, 9 assertion, 0 lỗi).
+
+Muốn thấy timeout: chạy `docker compose stop payment-service` rồi gửi đơn mới. Sau khoảng 3 giây sẽ nhận `PROCESSING_FAILED`, và request hết hạn nằm trong `payment.rpc.request.dlq` trên RabbitMQ UI (`:15672`).
+
+### Thử Luồng 2 và polling (PowerShell, một dòng)
+
+`POST` trả `202`, sau đó `GET` mỗi 300 ms cho tới khi đơn là `ISSUED` hoặc `PROCESSING_FAILED` (tối đa 30 giây):
+
+```powershell
+$body = '{"partner_order_id":"D3-' + (Get-Date -Format HHmmss) + '","customer_name":"Nguyen Van A","phone":"0901234567","amount":500000,"mode":"GRPC_KAFKA"}'; $sw = [Diagnostics.Stopwatch]::StartNew(); $r = Invoke-WebRequest -UseBasicParsing -Method Post -Uri http://localhost:8080/api/v1/orders -ContentType 'application/json' -Body $body; $a = $r.Content | ConvertFrom-Json; "POST http=$([int]$r.StatusCode) elapsed_ms=$($sw.ElapsedMilliseconds) status=$($a.status) order_id=$($a.order_id) correlation_id=$($a.correlation_id)"; do { Start-Sleep -Milliseconds 300; $o = Invoke-RestMethod "http://localhost:8080/api/v1/orders/$($a.order_id)"; "poll t=$($sw.ElapsedMilliseconds)ms status=$($o.status)" } until ($o.status -in 'ISSUED','PROCESSING_FAILED' -or $sw.ElapsedMilliseconds -gt 30000); "policy_number=$($o.policy_number)"; $o.timeline | Format-Table seq, step, service, transport, status, duration_ms, detail -AutoSize
+```
+
+Kết quả thật (2026-09-25, đơn đầu tiên ngay sau `docker compose up`):
+
+```text
+POST http=202 elapsed_ms=2035 status=PAYMENT_RECORDED order_id=ORD-20260925-A8DF050D correlation_id=2a4e3178-eaae-4612-9f6a-bb03efa22944
+poll t=2436ms status=PAYMENT_RECORDED
+poll t=2774ms status=ISSUED
+policy_number=ACBI-2026-653536
+
+seq step            service             transport  status  duration_ms detail
+  1 ORDER_CREATED   order-service       HTTP       SUCCESS         126
+  2 PAYMENT         payment-service     gRPC       SUCCESS        1381 PAY-ddd8d342-bd09-45b6-a6ea-49db9e4b330a
+  3 POLICY_ISSUANCE policy-service      Kafka      SUCCESS         143 ACBI-2026-653536
+  4 NOTIFICATION    notification-worker IN_PROCESS SUCCESS           0 SMS sent (simulated)
+```
+
+Các đơn sau, khi hệ thống đã ổn định: `202` trong khoảng 220–360 ms và `ISSUED` trong khoảng 330–500 ms. Với bước `POLICY_ISSUANCE`, `duration_ms` là thời gian từ lúc Policy phát hành tới lúc Order nhận event.
+
+- **Payment tắt:** `docker compose stop payment-service` rồi gửi đơn mới. Kết quả là `200 PROCESSING_FAILED`, với `failure_reason` là **một trong hai**:
+  - `PAYMENT_SERVICE_UNAVAILABLE` (`grpc_status=UNAVAILABLE`), trả về nhanh. Đo ngày 2026-09-28: 70 ms và 92 ms khi gửi ngay sau lúc dừng, 925 ms ở một lần khác.
+  - `PAYMENT_TIMEOUT` (`grpc_status=DEADLINE_EXCEEDED`), sau khoảng 3 giây. Đo cùng ngày: 3199 ms khi gửi khoảng 30 giây sau lúc dừng.
+
+  Lời gọi gRPC không bao giờ chờ quá deadline 3 giây (log `grpc_call_failed` ghi 3004–3146 ms), nên HTTP không bị treo theo Payment. Chưa xác định được vì sao lúc thì ra lỗi này, lúc thì ra lỗi kia; cả hai đều được xử lý như nhau, và mã gRPC gốc nằm trong `detail` của timeline. Bật lại bằng `docker compose up -d --wait payment-service`.
+- **Truy vết:** `docker compose logs --no-log-prefix order-service payment-service policy-service | Select-String <correlation_id>` cho ra log gRPC và Kafka của cả 3 service.
+
+### Xem Kafka UI
+
+```powershell
+docker compose --profile tools up -d kafka-ui   # rồi mở http://localhost:8090
+```
+
+Chọn cluster `sandbox` → **Topics**. Có 4 topic, mỗi topic 3 partition: `payment.recorded`, `policy.issued`, `payment.recorded.DLT`, `policy.issued.DLT`. Ở tab **Messages** của một topic sẽ thấy key (`order_id`), partition và value (envelope JSON). Mọi event của cùng một đơn luôn nằm trên cùng một partition.
+
+Gửi lại event trùng và gửi message lỗi vào DLT: xem [Kịch bản ngoại lệ (Ngày 5)](#kịch-bản-ngoại-lệ-ngày-5).
+
+### Thử hai tình huống publish lỗi (PowerShell, đã chạy thật ngày 2026-09-25)
+
+Cả hai tình huống đều làm hỏng Kafka có chủ đích. Nên chạy xong phần kiểm tra khác rồi mới làm. Chạy lần lượt từng dòng trong **cùng một cửa sổ PowerShell**, vì biến `$id` được giữ từ dòng này sang dòng sau.
+
+**A. Payment publish `payment.recorded` lỗi** (dual write: event mất thật):
+
+```powershell
+docker compose stop kafka
+$body = '{"partner_order_id":"NOKAFKA-' + (Get-Date -Format HHmmss) + '","customer_name":"A","phone":"0901234567","amount":500000,"mode":"GRPC_KAFKA"}'; $r = Invoke-WebRequest -UseBasicParsing -Method Post -Uri http://localhost:8080/api/v1/orders -ContentType 'application/json' -Body $body; $a = $r.Content | ConvertFrom-Json; $id = $a.order_id; "http=$([int]$r.StatusCode) status=$($a.status) order_id=$id"
+Start-Sleep -Seconds 8; docker compose logs --no-log-prefix payment-service | Select-String $id | ForEach-Object { $_.Line | ConvertFrom-Json } | Select-Object timestamp, transport, action, status, execution_time_ms | Format-Table -AutoSize
+docker compose up -d --wait kafka
+Start-Sleep -Seconds 30; "status after Kafka is back: " + (Invoke-RestMethod "http://localhost:8080/api/v1/orders/$id").status
+"SELECT (SELECT COUNT(*) FROM payment_db.payments WHERE order_id = '$id') AS payments, (SELECT COUNT(*) FROM policy_db.policies WHERE order_id = '$id') AS policies;" | docker compose exec -T mysql sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" 2>/dev/null'
+```
+
+Kết quả: `POST` vẫn trả `202 PAYMENT_RECORDED` (khoảng 1,3 s), vì response được gửi trước khi publish. Sau 5,4 s, payment-service log `event_publish_failed`. Bật lại Kafka và chờ 60 giây, đơn vẫn `PAYMENT_RECORDED`; `payment_db` có 1 dòng, `policy_db` có 0 dòng. Đây là giới hạn dual write, cách sửa đúng là Transactional Outbox.
+
+**B. Policy publish `policy.issued` lỗi, sau đó khôi phục.** Xóa topic `policy.issued` (broker đã tắt auto-create) để chỉ lần publish bị lỗi:
+
+```powershell
+docker compose exec -T kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --delete --topic policy.issued
+$body = '{"partner_order_id":"NOTOPIC-' + (Get-Date -Format HHmmss) + '","customer_name":"A","phone":"0901234567","amount":500000,"mode":"GRPC_KAFKA"}'; $r = Invoke-WebRequest -UseBasicParsing -Method Post -Uri http://localhost:8080/api/v1/orders -ContentType 'application/json' -Body $body; $a = $r.Content | ConvertFrom-Json; $id = $a.order_id; "http=$([int]$r.StatusCode) status=$($a.status) order_id=$id"
+Start-Sleep -Seconds 35; docker compose logs --no-log-prefix policy-service | Select-String $id | ForEach-Object { $_.Line | ConvertFrom-Json } | Where-Object { $_.action } | Select-Object timestamp, action, outcome, execution_time_ms | Format-Table -AutoSize
+"status: " + (Invoke-RestMethod "http://localhost:8080/api/v1/orders/$id").status
+```
+
+Kết quả: lần đầu `IssuePolicy outcome=ISSUED`, rồi `event_publish_failed` sau 5 s. Ba lần retry sau đó đều `DUPLICATE_EVENT_IGNORED` (không tạo hợp đồng mới) và thử publish lại nhưng vẫn lỗi. Cuối cùng log `event_dead_lettered`, event nằm trong `payment.recorded.DLT`. Đơn kẹt ở `PAYMENT_RECORDED`, `policy_db` có đúng 1 hợp đồng.
+
+Khôi phục: tạo lại topic (bean `NewTopic` chạy khi khởi động) rồi đẩy event từ DLT về topic gốc:
+
+```powershell
+docker compose restart policy-service; docker compose up -d --wait policy-service
+$ev = (docker compose exec -T kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic payment.recorded.DLT --from-beginning --formatter-property print.key=true --formatter-property 'key.separator=|' --timeout-ms 5000 2>$null | Select-String $id | Select-Object -First 1).Line.TrimStart([char]0xFEFF); "event from DLT: $ev"
+$ev | docker compose exec -T kafka sh -c "awk 'NR==1{sub(/^\357\273\277/,e)} {sub(/\r$/,e); print}' | /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server localhost:9092 --topic payment.recorded --reader-property parse.key=true --reader-property key.separator='|'"
+Start-Sleep -Seconds 5; "status: " + (Invoke-RestMethod "http://localhost:8080/api/v1/orders/$id").status
+"SELECT COUNT(*) AS policies FROM policy_db.policies WHERE order_id = '$id';" | docker compose exec -T mysql sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" 2>/dev/null'
+```
+
+(PowerShell 5.1 không có `&&`, nên các lệnh nối nhau bằng `;`.)
+
+Kết quả: Policy log `DUPLICATE_EVENT_IGNORED` rồi `PublishPolicyIssued`; Order log `ApplyPolicyIssued outcome=APPLIED`. Khoảng 2 s sau đơn là `ISSUED`, vẫn 1 hợp đồng, timeline 4 bước. Đây là lý do Policy publish lại `policy.issued` khi gặp event trùng.
+
+---
+
+## Kịch bản ngoại lệ (Ngày 5)
+
+Ba kịch bản dưới đây chạy trên sandbox đang chạy (`docker compose up -d --wait`), bằng Windows PowerShell 5.1. Mỗi kịch bản tự tạo đơn cần dùng. Chạy lần lượt từng dòng trong **cùng một cửa sổ PowerShell**, vì biến (`$id`, `$ev`) được giữ từ dòng này sang dòng sau. Kết quả mẫu bên dưới đo ngày 2026-09-28.
+
+### (a) DLQ của RabbitMQ: Payment tắt, request hết hạn
+
+```powershell
+docker compose exec -T rabbitmq rabbitmqctl list_queues name messages | Select-String 'dlq'
+docker compose stop payment-service
+$body = '{"partner_order_id":"DLQ-' + (Get-Date -Format HHmmss) + '","customer_name":"A","phone":"0901234567","amount":500000,"mode":"RABBITMQ_RPC"}'; $sw = [Diagnostics.Stopwatch]::StartNew(); $a = Invoke-RestMethod -Method Post -Uri http://localhost:8080/api/v1/orders -ContentType 'application/json' -Body $body; "elapsed_ms=$($sw.ElapsedMilliseconds) status=$($a.status) failure_reason=$($a.failure_reason)"
+Start-Sleep -Seconds 2; docker compose exec -T rabbitmq rabbitmqctl list_queues name messages | Select-String 'dlq'
+docker compose up -d --wait payment-service
+$body = '{"partner_order_id":"WARM-' + (Get-Date -Format HHmmss) + '","customer_name":"A","phone":"0901234567","amount":500000,"mode":"RABBITMQ_RPC"}'; $sw = [Diagnostics.Stopwatch]::StartNew(); $a = Invoke-RestMethod -Method Post -Uri http://localhost:8080/api/v1/orders -ContentType 'application/json' -Body $body; "warm-up: elapsed_ms=$($sw.ElapsedMilliseconds) status=$($a.status)"
+```
+
+**Kết quả mong đợi:**
+- `POST` trả `200` sau khoảng 3 giây với `PROCESSING_FAILED` / `PAYMENT_TIMEOUT`. HTTP không treo.
+- `payment.rpc.request.dlq` tăng đúng 1. Request nằm trong queue quá TTL 3 giây, không ai nhận, nên bị chuyển vào DLQ thay vì được xử lý muộn.
+- Đơn mồi (dòng cuối) trả `ISSUED`.
+
+Kết quả thật: `elapsed_ms=3269 status=PROCESSING_FAILED failure_reason=PAYMENT_TIMEOUT`; DLQ từ `2` lên `3`; đơn mồi `182 ms ISSUED`.
+
+**Vì sao gửi đơn mồi:** request đầu tiên sau khi một service vừa khởi động lại có thể mất khoảng 2,8 giây (khởi tạo kết nối, nạp class), sát timeout 3 giây. Đơn mồi giúp đơn demo tiếp theo không bị timeout oan.
+
+### (b) DLT của Kafka: message không phải JSON
+
+```powershell
+docker compose exec -T kafka /opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server localhost:9092 --topic payment.recorded.DLT
+$key = 'GARBAGE-' + (Get-Date -Format HHmmss); "$key|{not json" | docker compose exec -T kafka /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server localhost:9092 --topic payment.recorded --reader-property parse.key=true --reader-property key.separator="|"
+Start-Sleep -Seconds 3; docker compose exec -T kafka /opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server localhost:9092 --topic payment.recorded.DLT
+docker compose logs --no-log-prefix --since 1m policy-service | Select-String 'event_dead_lettered' | ForEach-Object { $_.Line | ConvertFrom-Json } | Select-Object timestamp, action, topic, partition, offset | Format-Table -AutoSize
+```
+
+**Kết quả mong đợi:**
+- `kafka-get-offsets.sh` in `topic:partition:offset`. Sau khi gửi, tổng offset của `payment.recorded.DLT` tăng đúng 1.
+- policy-service log `event_dead_lettered`. Message không đọc được thì vào DLT **ngay**, không retry, và consumer đi tiếp (không kẹt).
+
+Kết quả thật: `payment.recorded.DLT:1:0` thành `payment.recorded.DLT:1:1`; log `event_dead_lettered payment.recorded partition 1 offset 10`.
+
+### (c) Gửi lại event trùng: vẫn 1 hợp đồng
+
+Tạo 1 đơn Luồng 2, đọc event `payment.recorded` của đơn đó, rồi gửi lại event 3 lần:
+
+```powershell
+$body = '{"partner_order_id":"REPLAY-' + (Get-Date -Format HHmmss) + '","customer_name":"A","phone":"0901234567","amount":500000,"mode":"GRPC_KAFKA"}'; $a = Invoke-RestMethod -Method Post -Uri http://localhost:8080/api/v1/orders -ContentType 'application/json' -Body $body; $id = $a.order_id; Start-Sleep -Seconds 3; "order_id=$id status=" + (Invoke-RestMethod "http://localhost:8080/api/v1/orders/$id").status
+$ev = (docker compose exec -T kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic payment.recorded --from-beginning --formatter-property print.key=true --formatter-property 'key.separator=|' --timeout-ms 5000 2>$null | Select-String $id | Select-Object -First 1).Line; "event: $ev"
+$ev, $ev, $ev | docker compose exec -T kafka sh -c "awk 'NR==1{sub(/^\357\273\277/,e)} {sub(/\r$/,e); print}' | /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server localhost:9092 --topic payment.recorded --reader-property parse.key=true --reader-property key.separator='|'"
+Start-Sleep -Seconds 5; docker compose logs --no-log-prefix --since 1m policy-service order-service | Select-String $id | ForEach-Object { $_.Line | ConvertFrom-Json } | Where-Object action -eq 'duplicate_event_ignored' | Select-Object timestamp, service, action, order_id | Format-Table -AutoSize
+"SELECT COUNT(*) AS policies FROM policy_db.policies WHERE order_id = '$id';" | docker compose exec -T mysql sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" 2>/dev/null'
+"timeline steps: " + ((Invoke-RestMethod "http://localhost:8080/api/v1/orders/$id").timeline.step -join ', ')
+```
+
+**Kết quả mong đợi:**
+- `duplicate_event_ignored` xuất hiện **3 lần ở policy-service** (inbox theo `event_id`). Mỗi lần, Policy publish lại `policy.issued` với hợp đồng cũ.
+- `duplicate_event_ignored` xuất hiện **3 lần ở order-service** (`event_id` của `policy.issued` là tất định).
+- `policies = 1`.
+- Timeline vẫn 4 bước: `ORDER_CREATED, PAYMENT, POLICY_ISSUANCE, NOTIFICATION`.
+
+Kết quả thật đúng như trên. Cả 3 bản gửi lại nằm cùng partition, cùng key (21 ký tự) với event gốc. Có thể làm tương tự trên Kafka UI (**Produce Message**, cùng key và value).
+
+**Vì sao (c) dùng `sh -c` + `awk` còn (b) thì không:** khi pipe vào `docker compose exec`, PowerShell 5.1 chèn BOM UTF-8 vào đầu dòng đầu tiên, kể cả trong cửa sổ mới mở (đã thử 2026-09-28). Với (b), key rác dính BOM cũng không sao. Với (c), bản gửi lại đầu tiên sẽ có key `<BOM>ORD-…` (22 ký tự) và rơi vào **partition khác** với event gốc. Việc chống trùng vẫn đúng, nhưng thứ tự event theo `order_id` không còn được giữ. `awk` trong container bỏ BOM và `\r` trước khi dữ liệu tới Kafka.
+
+Lưu ý khi dùng PowerShell 5.1:
+- Chuỗi trong `sh -c "..."` không chứa dấu nháy kép, vì PowerShell 5.1 làm mất dấu nháy kép khi truyền tham số cho chương trình ngoài. Vì vậy bên trong dùng `key.separator='|'`.
+- Với `--formatter-property`, `'key.separator=|'` phải nằm trong dấu nháy, nếu không `|` sẽ bị hiểu là pipe.
+- Câu SQL được đưa vào `mysql` qua pipe (stdin), không truyền bằng `-e "..."`.
+
+---
+
+## Luồng 2: gRPC + Kafka
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Client / UI
+    participant O as Order Service
+    participant P as Payment Service
+    participant K as Kafka
+    participant Pol as Policy Service
+
+    C->>O: POST /api/v1/orders (mode=GRPC_KAFKA)
+    O->>O: insert order CREATED
+    O->>P: gRPC RecordPayment (deadline 3 s, metadata x-correlation-id)
+    P->>P: PaymentRecorder: INSERT payment, COMMIT
+    P-->>O: RecordPaymentResponse RECORDED
+    O->>O: status PAYMENT_RECORDED
+    O-->>C: 202 Accepted (PAYMENT_RECORDED, correlation_id)
+    P->>K: payment.recorded (key order_id)
+    K->>Pol: payment.recorded
+    Pol->>Pol: inbox(event_id) + INSERT policy, COMMIT
+    Pol->>K: policy.issued (key order_id)
+    Pol->>K: commit offset payment.recorded
+    K->>O: policy.issued
+    O->>O: inbox(event_id) + status ISSUED, COMMIT, notification
+    O->>K: commit offset policy.issued
+    loop polling
+        C->>O: GET /api/v1/orders/{id}
+        O-->>C: 200 (status, timeline)
+    end
+```
+
+|  | Luồng 1: `RABBITMQ_RPC` | Luồng 2: `GRPC_KAFKA` |
+|---|---|---|
+| Kiểu | Đồng bộ: thread HTTP chờ cả Payment lẫn Policy | Đồng bộ tới Payment, sau đó bất đồng bộ qua event |
+| HTTP trả về | `200` khi đã `ISSUED` (hoặc `PROCESSING_FAILED`) | `202` khi đã `PAYMENT_RECORDED`; client polling tới `ISSUED` |
+| Thời gian chờ tối đa | khoảng 6 giây (2 lần RPC × 3 giây) | 3 giây (1 lần gọi gRPC) |
+| Order → Payment | RabbitMQ `payment.rpc.request`, Direct Reply-to | gRPC `RecordPayment`, HTTP/2 + Protobuf |
+| Payment → Policy | Order gọi RPC tiếp | Event `payment.recorded` |
+| Policy → Order | Reply RPC | Event `policy.issued` |
+| `correlation_id` | header `x-correlation-id` | metadata gRPC `x-correlation-id`, trường `correlation_id` của envelope |
+| Chống trùng phía nhận | `UNIQUE(partner_transaction_id)`, `UNIQUE(order_id)` | Như Luồng 1, cộng thêm `consumer_inbox` theo `event_id` |
+| Message lỗi | `<queue>.dlq` (RabbitMQ) | `<topic>.DLT` (Kafka), sau 3 lần thử lại |
+
+---
+
+## Kiến trúc
+
+```text
+Web UI (nginx :3000) ──/api──► Order Service :8080 ──┬── Luồng 1: RabbitMQ RPC ──► Payment :8081 / Policy :8082
+                                    │                └── Luồng 2: gRPC ──► Payment :9090 ──Kafka──► Policy ──Kafka──► Order
+                                    ├── Redis (idempotency + cache)
+                                    └── MySQL (order_db | payment_db | policy_db, mỗi service một schema)
+```
+
+- **Quyết định thiết kế D1–D21** (bản đầy đủ, tiếng Anh): [`docs/design-decisions.md`](docs/design-decisions.md)
+- **Sơ đồ sequence chi tiết** (gồm cả nhánh lỗi: timeout, trùng request, gửi lại event, DLQ): [`docs/sequence-diagrams.md`](docs/sequence-diagrams.md)
+- **Các trường hợp xấu và cách xử lý (F1–F32), khung service:** [`docs/implementation-plan.md`](docs/implementation-plan.md)
+- **Hợp đồng:** [`contracts/payment.proto`](contracts/payment.proto) (gRPC); JSON Schemas trong [`contracts/schemas/`](contracts/schemas): message RabbitMQ (`*-rpc-*.schema.json`), envelope Kafka (`event-envelope.schema.json`) và hai event `payment-recorded.schema.json`, `policy-issued.schema.json`.
+
+### Cấu trúc thư mục
+
+```text
+contracts/          payment.proto + Maven module sinh gRPC stub (dùng chung cho Order và Payment)
+order-service/      REST API, điều phối 2 luồng
+payment-service/    ghi nhận thanh toán (RabbitMQ RPC + gRPC server)
+policy-service/     phát hành hợp đồng (RabbitMQ RPC + Kafka consumer)
+ui/                 HTML/JS tĩnh (index.html, app.js, style.css) + nginx.conf (proxy /api)
+docker/             service.Dockerfile dùng chung + mysql/init.sql
+docs/               quyết định thiết kế, sơ đồ sequence, kế hoạch triển khai, ảnh chụp UI (docs/images)
+scripts/            run-tests.ps1
+```
+
+---
+
+## Quyết định thiết kế chính
+
+Đề bài có một số điểm mâu thuẫn hoặc để ngỏ. Các quyết định dưới đây là có chủ đích; bản đầy đủ D1–D21 nằm ở [`docs/design-decisions.md`](docs/design-decisions.md).
+
+- **Cache-aside, xóa key khi trạng thái đổi (D1):** để lần xem đầu hiện `CACHE MISS (DB)` và lần refresh hiện `CACHE HIT (REDIS)`, đúng yêu cầu demo. Chi tiết ở mục Ngày 4 bên dưới.
+- **`partner_transaction_id = TXN-{partner_order_id}` (D2):** chống gạch nợ trùng thêm một lớp ở Payment.
+- **Request trùng `partner_order_id` bị chặn bằng `409` theo yêu cầu của lead (D21):** request hợp lệ đầu tiên được giữ; request sau giống hệt thì trả `409 DUPLICATE_ORDER` (kèm `order_id` gốc), khác dữ liệu thì trả `409 DUPLICATE_ORDER_MISMATCH`; trùng đến đồng thời trả `409 ORDER_IN_PROGRESS` (D11). Khác với đề V.1 ("trả về kết quả cũ"), nên response vẫn trỏ về đơn gốc và UI hiển thị đơn gốc.
+- **Chống trùng khi consume Kafka bằng `consumer_inbox` và `UNIQUE(order_id)` (D10):** Kafka gửi lại event cũng không sinh hợp đồng thứ hai.
+- **RPC timeout 3s, message tự hết hạn và vào DLQ (D7).**
+
+### Luồng 2 (gRPC + Kafka), chốt ở Ngày 3
+
+- **Mã trả về:** gọi gRPC thành công trả `202` với trạng thái đang lưu trong DB (thường là `PAYMENT_RECORDED`; nếu `policy.issued` về nhanh hơn thì đã là `ISSUED`, không ép về `PAYMENT_RECORDED`). gRPC thất bại trả `200` với `PROCESSING_FAILED`, giống Luồng 1: request đã xử lý xong, chỉ là kết quả thất bại.
+- **Tên lỗi của Luồng 2:** `PAYMENT_TIMEOUT` (`DEADLINE_EXCEEDED`), `PAYMENT_SERVICE_UNAVAILABLE` (`UNAVAILABLE`), `PAYMENT_GRPC_ERROR` (mọi mã gRPC khác). Mã gRPC gốc được ghi vào `detail` của timeline và field `grpc_status` trong log, nên không mất thông tin khi gộp nhóm.
+- **Deadline đặt cho từng lần gọi** (`withDeadlineAfter(3000 ms)`), không đặt một lần trên stub. Deadline là một mốc thời gian tuyệt đối: đặt một lần lúc khởi động thì các lần gọi sau đã hết hạn sẵn.
+- **Order được insert (`CREATED`) trước khi gọi gRPC**, để `policy.issued` về sớm vẫn tìm thấy đơn.
+- **Payment trả response gRPC trước, publish Kafka sau** (vẫn là sau khi DB commit). Nếu Kafka chậm hoặc chết, Order không bị đẩy quá deadline trong khi tiền đã gạch. Producer có `max.block.ms = 5000`; publish lỗi thì log `event_publish_failed`.
+- **`event_id` tất định:** `payment.recorded` lấy UUID name-based từ `payment_id`, `policy.issued` lấy từ `policy_id`. Publish lại cùng một sự kiện (gRPC gọi lại, retry) sẽ ra cùng `event_id`, nên inbox bên nhận nhận ra và bỏ qua.
+- **Policy vẫn publish lại `policy.issued` khi gặp event trùng** (`DUPLICATE_EVENT_IGNORED`): không tạo hợp đồng mới, vẫn log `duplicate_event_ignored`, nhưng gửi lại `policy.issued` với dữ liệu hợp đồng đã có. Lý do: lần xử lý đầu có thể đã commit hợp đồng rồi mới lỗi lúc publish. Nếu không gửi lại, đơn sẽ kẹt ở `PAYMENT_RECORDED` mãi. Lần publish này đồng bộ, có timeout 5 giây; lỗi thì ném exception để offset không được commit và event được thử lại. Order bỏ qua bản gửi lại nhờ `event_id` tất định.
+- **Trạng thái đơn chỉ đi tiến** (thay cho bản thiết kế ban đầu "chỉ cho `PAYMENT_RECORDED → ISSUED`"): cho phép `CREATED | PAYMENT_RECORDED | PROCESSING_FAILED → ISSUED` và `CREATED | PAYMENT_RECORDED → PROCESSING_FAILED`. Chuyển trạng thái lùi bị bỏ qua và log `stale_transition_ignored`, nhưng bước timeline vẫn được ghi đúng một lần. Lý do:
+  - `policy.issued` có thể về trước khi Order ghi `PAYMENT_RECORDED` (event nhanh hơn luồng gRPC).
+  - Order có thể đã báo `PAYMENT_TIMEOUT` trong khi Payment vẫn gạch nợ xong và hợp đồng thật sự được phát hành. Khi đó hiển thị `FAILED` cho một hợp đồng đang tồn tại là sai, nên đơn chuyển sang `ISSUED`.
+- **Event cho đơn không tồn tại không bị bỏ qua** (thay cho bản thiết kế ban đầu "log rồi commit offset"): `OrderNotFoundException` làm transaction rollback, kể cả dòng inbox, rồi event được thử lại 3 lần và vào `policy.issued.DLT` để người vận hành xem. Nếu âm thầm ack, event sẽ biến mất mà không để lại dấu vết.
+- **Dead Letter Topic tên `<topic>.DLT`**, khai báo tường minh (Spring Kafka 4 mặc định là `<topic>-dlt`). Mỗi DLT có 3 partition như topic gốc, vì record được chuyển sang đúng partition cũ.
+- **Warm-up gRPC ở order-service (`GrpcWarmUp`):** trước khi có bước này, lần gọi `RecordPayment` đầu tiên sau khi order-service khởi động mất 1381–2205 ms phía Order (khởi tạo channel, Netty, HTTP/2, nạp class), trong khi Payment chỉ xử lý 11–29 ms, nên khá sát deadline 3 giây. Lúc khởi động, Order gọi **gRPC health check chuẩn** (`grpc.health.v1.Health/Check`) trên đúng channel `payment`, không gọi `RecordPayment` giả vì như vậy sẽ tạo thanh toán rác. Healthcheck của compose dùng `/actuator/health/readiness`, nên container chỉ `healthy` sau khi đã warm-up. Đo lại: bước `PAYMENT` của đơn đầu tiên còn 49 ms.
+- **Warm-up gRPC ở payment-service (`GrpcServerWarmUp`):** warm-up của Order chỉ chạy khi order-service khởi động. Nếu **chỉ payment-service khởi động lại** (ví dụ lúc demo "tắt payment rồi bật lại"), phía server vẫn nguội: lần `RecordPayment` đầu tiên mất 1746 ms và đơn bị `PAYMENT_TIMEOUT`, trong khi Payment vẫn gạch nợ. Vì vậy, ngay khi server gRPC bắt đầu lắng nghe, payment-service tự gọi `RecordPayment` vào chính nó qua kết nối cục bộ thật, với `amount = 0`. `PaymentRecorder` từ chối request này trước khi chạm DB, và kết quả `REJECTED` không bao giờ được publish, nên không có gì được lưu hay gửi đi. Đo lại khi chỉ khởi động lại payment-service: bước `PAYMENT` của đơn đầu tiên 135 ms; sau khi tắt rồi bật lại, 49 ms.
+- **Không dùng header `__TypeId__`:** value là chuỗi JSON do `JsonMapper` của Spring Boot ghi (snake_case), bên nhận tự biết kiểu dữ liệu của topic mình đọc. Hai service không phụ thuộc tên class Java của nhau.
+
+### Redis, log và UI, chốt ở Ngày 4
+
+- **Thay bước "Set/Update Cache" trong sơ đồ của đề bằng việc xóa key:** sơ đồ Luồng 1 ghi *"Set Cache order:{order_id}"* sau khi phát hành, sơ đồ Luồng 2 ghi *"Update Cache"* khi nhận `policy.issued`. Làm như vậy thì lần GET đầu tiên đã là HIT, trong khi mục IV.3 yêu cầu lần load đầu phải thấy `CACHE MISS (DB)`. Vì vậy chỉ `GET` mới ghi cache (khi không có trong cache), còn mọi lần đổi trạng thái thì **xóa** `order:{order_id}` sau khi transaction commit.
+- **Chỉ cache đơn đã xong hẳn:** `ISSUED` và đã có bước `NOTIFICATION`. `PROCESSING_FAILED` chưa phải trạng thái cuối, vì đơn có thể chuyển sang `ISSUED` khi `policy.issued` về muộn. Bước thông báo là một transaction riêng, chạy sau `ISSUED`. Nếu cache sớm, một lần GET chen vào đúng lúc có thay đổi có thể giữ bản cũ suốt 10 phút. Dù vậy `GET` vẫn luôn hỏi Redis trước (mục V.1).
+- **Key chống trùng có 2 giai đoạn:** `SET NX` với TTL 30 giây trước khi ghi đơn, rồi gia hạn lên 24 giờ khi đơn đã commit; nếu ghi thất bại thì trả key lại. Key có mà đơn chưa có nghĩa là một request giống hệt đang chạy, trả `409` (D11). Nếu service sập giữa 2 bước, `partner_order_id` chỉ bị khóa 30 giây chứ không phải 24 giờ.
+- **Redis chết thì không kéo hệ thống chết theo (D12):** timeout 300 ms, log `redis_unavailable`, chống trùng dựa vào `UNIQUE(partner_order_id)` của MySQL, GET đọc MySQL. Redis không nằm trong `/actuator/health`, nên healthcheck vẫn `UP`.
+- **Redis lỗi thì bỏ qua Redis 5 giây (circuit breaker đơn giản, `RedisAvailability`):** mỗi POST gọi Redis 4–6 lần. Khi Redis chết, lần nào cũng phải chờ hết timeout 300 ms, nên mỗi đơn mất khoảng 1,9 s thay vì khoảng 140 ms. Giờ sau lần lỗi đầu tiên, trong 5 giây (`sandbox.redis.retry-after`) hệ thống không gọi Redis và không ghi log cho từng request, mà dùng MySQL ngay; hết 5 giây mới thử lại Redis. Log chỉ ghi `redis_circuit_open` một lần khi Redis bắt đầu lỗi và `redis_circuit_closed` một lần khi Redis trả lời lại. Đo trên Docker (dừng Redis, gửi 3 POST liên tiếp): lần 1 mất **490 ms** (chịu lần lỗi đầu tiên), lần 2 và 3 mất **176 / 188 ms**, bằng mức khi Redis sống (114–214 ms). Chọn 5 giây vì đủ ngắn để Redis được dùng lại ngay sau khi sống lại, và đủ dài để mỗi lần Redis chết chỉ tốn một lần timeout mỗi 5 giây.
+- **Log:** mọi điểm vào (filter HTTP, listener RabbitMQ và Kafka, interceptor gRPC) đặt `transport` vào MDC và xóa trong `finally`. Log của các class nghiệp vụ dùng chung vì vậy cũng có `transport`. Filter HTTP chỉ đặt `transport`; `correlation_id` của GET được đặt sau khi đã đọc được đơn. Nếu một dòng log tự ghi `transport`, giá trị đó thắng và key không bị lặp (JSON có key trùng thì `ConvertFrom-Json` báo lỗi). Log đánh dấu (`duplicate_*_ignored`…) có `status` nhưng không có `execution_time_ms`, vì không có thao tác nào được đo. Log của Kafka client hạ xuống `WARN`.
+- **UI:** nhãn cache luôn lấy từ response của `GET` (sau khi POST, UI gọi GET 1 lần); dữ liệu hiển thị bằng `textContent`, không dùng `innerHTML` (tên khách hàng chứa HTML chỉ hiện ra dạng chữ); "Log" trong kết quả Ngày 4 của đề được hiểu là UI đưa sẵn lệnh truy vết log theo `correlation_id`, không dựng hạ tầng gom log.
+
+### Giới hạn đã biết (nói rõ khi demo)
+
+- Payment có thể đã gạch nợ trong khi đơn bị timeout (cả hai luồng).
+- **Dual write ở Payment:** "commit DB rồi mới publish `payment.recorded`" không nguyên tử. Kafka chết đúng lúc đó thì event mất, đơn kẹt ở `PAYMENT_RECORDED`. Policy cũng ghi DB rồi mới publish `policy.issued`, nhưng trường hợp này đã có retry kèm publish lại. Cách làm đúng trong production là **Transactional Outbox**: ghi event vào bảng outbox trong cùng transaction, rồi một tiến trình khác đẩy lên Kafka. Bài này không làm Outbox.
+- **Event có thể về không theo thứ tự so với luồng gRPC:** `policy.issued` có thể tới Order trước khi Order ghi xong `PAYMENT_RECORDED`. Trạng thái chỉ đi tiến nên đơn vẫn là `ISSUED`, nhưng bước `PAYMENT` có thể nằm sau `POLICY_ISSUANCE` trong timeline. Giữa các event của cùng một đơn thì thứ tự được giữ, vì key là `order_id` nên chúng nằm cùng partition.
+- Không có job quét đơn treo: đơn kẹt ở `PAYMENT_RECORDED` (vì mất event) chỉ được phát hiện qua log `event_publish_failed`.
+- **Tắt payment-service có thể ra `PAYMENT_SERVICE_UNAVAILABLE` (khoảng 0,4 s) hoặc `PAYMENT_TIMEOUT` (3 s)**, tùy trạng thái kết nối gRPC lúc đó. Kết nối bị từ chối ngay thì báo `UNAVAILABLE`; kết nối cũ tới container đã dừng thì gói tin bị bỏ lặng lẽ và phải chờ hết deadline. Cả hai trường hợp đều không treo HTTP.
+- **Redis vừa sống lại chưa được dùng ngay:** sau khi bật lại Redis, Lettuce (thư viện kết nối Redis) cần vài giây để kết nối lại. Trong lúc đó mỗi lần thử vẫn timeout và kéo dài thêm 5 giây bỏ qua, nên Redis có thể chỉ được dùng lại sau khoảng 6–15 giây. Trong khoảng này mọi request vẫn chạy bằng MySQL. Khi đang bỏ qua Redis, việc xóa `order:{order_id}` cũng bị bỏ qua: nếu Redis chỉ bị gián đoạn chứ không mất dữ liệu, một đơn đã xong mà nhận thêm bước về muộn đúng lúc đó có thể vẫn đọc ra bản cũ trong cache tối đa 10 phút.
+- Cache-aside vẫn còn một khe nhỏ: một GET đọc MySQL ngay trước khi đơn đã xong hẳn nhận thêm một bước về muộn (ví dụ `PAYMENT` đến sau `ISSUED`), rồi ghi cache sau khi key đã bị xóa. Khi đó cache giữ bản thiếu bước đó tối đa 10 phút.
+- RabbitMQ đôi khi không khởi động được sau một lần build nặng (`.erlang.cookie: eacces`, đã gặp 2 lần, chưa tái hiện được có chủ đích). Cách xử lý nằm trong bảng sự cố ở phần "Chạy dự án".

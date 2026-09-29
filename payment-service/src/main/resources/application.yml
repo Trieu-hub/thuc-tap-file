@@ -1,0 +1,58 @@
+# Defaults target a local run against `docker compose` infrastructure (MySQL on host port 3307).
+# Inside Docker, docker-compose.yml overrides them with SPRING_* environment variables.
+spring:
+  application:
+    name: payment-service
+  datasource:
+    url: jdbc:mysql://localhost:3307/payment_db
+    username: payment_svc
+    password: payment_demo_pwd
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate   # Flyway owns the schema (CLAUDE.md 2.3)
+  jackson:
+    property-naming-strategy: SNAKE_CASE   # contracts/schemas use snake_case; the AMQP converter reuses this mapper
+  rabbitmq:
+    host: localhost
+    username: sandbox
+    password: sandbox_demo_pwd
+    listener:
+      simple:
+        # A message that throws goes to the DLQ once instead of being redelivered forever (F8).
+        default-requeue-rejected: false
+  grpc:
+    server:
+      port: 9090   # Flow 2: PaymentService.RecordPayment (Netty, HTTP/2), separate from the HTTP port
+  kafka:
+    bootstrap-servers: localhost:9094   # host listener (F25); compose sets kafka:9092
+    producer:
+      # Key and value are Strings (Boot's default serializers): the value is the envelope as JSON,
+      # written with Boot's mapper, so no __TypeId__ header naming a Java class is needed.
+      acks: all                          # the write is on every in-sync replica before send() succeeds
+      properties:
+        enable.idempotence: true         # a producer retry cannot write the record twice
+        max.block.ms: 5000               # Kafka down: send() gives up after 5 s instead of 60 s
+
+server:
+  port: 8081
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        # /actuator/health/readiness stays OUT_OF_SERVICE until RpcWarmUp has run (compose healthcheck)
+        enabled: true
+
+logging:
+  level:
+    # The Kafka client logs its whole configuration (dozens of lines) at INFO on every start,
+    # which buries the lines a demo greps for; warnings and errors are kept.
+    org.apache.kafka: WARN
+  structured:
+    format:
+      console: com.sandbox.payment.observability.SandboxJsonLogFormatter

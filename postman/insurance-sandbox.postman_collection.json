@@ -1,0 +1,147 @@
+{
+  "info": {
+    "name": "Insurance Sandbox",
+    "description": "Order Service REST API (README, mục API). Chạy theo thứ tự: 2 request Duplicate dùng lại partnerOrderId của Create order Luồng 2, Get order by id dùng orderId do Create order Luồng 2 lưu lại.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:8080" },
+    { "key": "partnerOrderId", "value": "" },
+    { "key": "orderId", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "Create order Luồng 1 (RABBITMQ_RPC)",
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": { "type": "text/javascript", "exec": [
+            "pm.collectionVariables.set('partnerOrderId', 'PM-' + Date.now() + '-' + Math.floor(Math.random() * 1000));"
+          ] }
+        },
+        {
+          "listen": "test",
+          "script": { "type": "text/javascript", "exec": [
+            "pm.test('200 OK', () => pm.response.to.have.status(200));"
+          ] }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [ { "key": "Content-Type", "value": "application/json" } ],
+        "body": { "mode": "raw", "raw": "{\"partner_order_id\":\"{{partnerOrderId}}\",\"customer_name\":\"Nguyen Van A\",\"phone\":\"0901234567\",\"amount\":500000,\"mode\":\"RABBITMQ_RPC\"}" },
+        "url": "{{baseUrl}}/api/v1/orders"
+      }
+    },
+    {
+      "name": "Create order Luồng 2 (GRPC_KAFKA)",
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": { "type": "text/javascript", "exec": [
+            "pm.collectionVariables.set('partnerOrderId', 'PM-' + Date.now() + '-' + Math.floor(Math.random() * 1000));"
+          ] }
+        },
+        {
+          "listen": "test",
+          "script": { "type": "text/javascript", "exec": [
+            "pm.test('202 Accepted', () => pm.response.to.have.status(202));",
+            "pm.collectionVariables.set('orderId', pm.response.json().order_id);"
+          ] }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [ { "key": "Content-Type", "value": "application/json" } ],
+        "body": { "mode": "raw", "raw": "{\"partner_order_id\":\"{{partnerOrderId}}\",\"customer_name\":\"Nguyen Van A\",\"phone\":\"0901234567\",\"amount\":500000,\"mode\":\"GRPC_KAFKA\"}" },
+        "url": "{{baseUrl}}/api/v1/orders"
+      }
+    },
+    {
+      "name": "Duplicate request (cùng partnerOrderId, cùng dữ liệu: 409 DUPLICATE_ORDER)",
+      "event": [
+        {
+          "listen": "test",
+          "script": { "type": "text/javascript", "exec": [
+            "pm.test('409 Conflict', () => pm.response.to.have.status(409));",
+            "pm.test('error = DUPLICATE_ORDER, points to the original order', () => {",
+            "  pm.expect(pm.response.json().error).to.eql('DUPLICATE_ORDER');",
+            "  pm.expect(pm.response.json().order_id).to.eql(pm.collectionVariables.get('orderId'));",
+            "});"
+          ] }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [ { "key": "Content-Type", "value": "application/json" } ],
+        "body": { "mode": "raw", "raw": "{\"partner_order_id\":\"{{partnerOrderId}}\",\"customer_name\":\"Nguyen Van A\",\"phone\":\"0901234567\",\"amount\":500000,\"mode\":\"GRPC_KAFKA\"}" },
+        "url": "{{baseUrl}}/api/v1/orders"
+      }
+    },
+    {
+      "name": "Duplicate with different amount (409 DUPLICATE_ORDER_MISMATCH)",
+      "event": [
+        {
+          "listen": "test",
+          "script": { "type": "text/javascript", "exec": [
+            "pm.test('409 Conflict', () => pm.response.to.have.status(409));",
+            "pm.test('error = DUPLICATE_ORDER_MISMATCH', () => pm.expect(pm.response.json().error).to.eql('DUPLICATE_ORDER_MISMATCH'));"
+          ] }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [ { "key": "Content-Type", "value": "application/json" } ],
+        "body": { "mode": "raw", "raw": "{\"partner_order_id\":\"{{partnerOrderId}}\",\"customer_name\":\"Nguyen Van A\",\"phone\":\"0901234567\",\"amount\":999000,\"mode\":\"GRPC_KAFKA\"}" },
+        "url": "{{baseUrl}}/api/v1/orders"
+      }
+    },
+    {
+      "name": "Invalid body (400)",
+      "event": [
+        {
+          "listen": "test",
+          "script": { "type": "text/javascript", "exec": [
+            "pm.test('400 Bad Request', () => pm.response.to.have.status(400));"
+          ] }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [ { "key": "Content-Type", "value": "application/json" } ],
+        "body": { "mode": "raw", "raw": "{\"partner_order_id\":\"\",\"customer_name\":\"Nguyen Van A\",\"phone\":\"\",\"amount\":0,\"mode\":\"RABBITMQ_RPC\"}" },
+        "url": "{{baseUrl}}/api/v1/orders"
+      }
+    },
+    {
+      "name": "Get order by id",
+      "event": [
+        {
+          "listen": "test",
+          "script": { "type": "text/javascript", "exec": [
+            "pm.test('200 OK', () => pm.response.to.have.status(200));"
+          ] }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "url": "{{baseUrl}}/api/v1/orders/{{orderId}}"
+      }
+    },
+    {
+      "name": "List orders",
+      "event": [
+        {
+          "listen": "test",
+          "script": { "type": "text/javascript", "exec": [
+            "pm.test('200 OK', () => pm.response.to.have.status(200));"
+          ] }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "url": "{{baseUrl}}/api/v1/orders"
+      }
+    }
+  ]
+}

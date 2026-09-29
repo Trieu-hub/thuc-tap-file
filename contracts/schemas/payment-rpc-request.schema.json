@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sandbox.local/contracts/payment-rpc-request.schema.json",
+  "title": "PaymentRpcRequest",
+  "description": "Body of a message published by order-service to queue 'payment.rpc.request' (Flow 1). AMQP properties: reply_to = amq.rabbitmq.reply-to (Direct Reply-to) and correlation_id are managed by RabbitTemplate. The business correlation id travels in header 'x-correlation-id'. Mirrors RecordPaymentRequest in payment.proto.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["order_id", "partner_order_id", "partner_transaction_id", "amount"],
+  "properties": {
+    "order_id": { "type": "string", "minLength": 1, "examples": ["ORD-20260923-4F7A2C"] },
+    "partner_order_id": { "type": "string", "minLength": 1 },
+    "partner_transaction_id": { "type": "string", "description": "TXN-{partner_order_id} (D2); payment is idempotent on it", "examples": ["TXN-P-1001"] },
+    "amount": { "type": "integer", "description": "VND, integer (D18). Payment replies REJECTED when <= 0", "examples": [500000] }
+  }
+}

@@ -1,0 +1,88 @@
+# Defaults target a local run against `docker compose` infrastructure (MySQL on host port 3307).
+# Inside Docker, docker-compose.yml overrides them with SPRING_* environment variables.
+spring:
+  application:
+    name: order-service
+  datasource:
+    url: jdbc:mysql://localhost:3307/order_db
+    username: order_svc
+    password: order_demo_pwd
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate   # Flyway owns the schema (CLAUDE.md 2.3)
+  jackson:
+    property-naming-strategy: SNAKE_CASE   # REST body and contracts/schemas use snake_case
+  rabbitmq:
+    host: localhost
+    username: sandbox
+    password: sandbox_demo_pwd
+    template:
+      # convertSendAndReceive returns null after this, it does not throw (D7). Default is 5000.
+      reply-timeout: 3000
+  grpc:
+    client:
+      channel:
+        payment:
+          # Local run; docker-compose.yml overrides it with static://payment-service:9090.
+          target: static://localhost:9090
+  data:
+    redis:
+      host: localhost                    # compose sets redis
+      port: 6379
+      # A few hundred ms: with Redis down a request falls back to MySQL instead of hanging (D12).
+      timeout: 300ms
+      connect-timeout: 300ms
+  kafka:
+    bootstrap-servers: localhost:9094   # host listener (F25); compose sets kafka:9092
+    producer:
+      # Only used to copy failed records to policy.issued.DLT.
+      acks: all
+      properties:
+        enable.idempotence: true
+        max.block.ms: 5000
+    consumer:
+      group-id: order-service
+      auto-offset-reset: earliest        # a new group starts at the oldest event, none is skipped
+      enable-auto-commit: false          # no commit on a timer, only after the listener returned
+    listener:
+      # Commit each record's offset after the listener returned, i.e. after its DB transaction
+      # committed: a crash in between redelivers the event, and the inbox skips it (at-least-once).
+      ack-mode: record
+
+sandbox:
+  grpc:
+    # Deadline of each RecordPayment call, same budget as the Flow 1 RPC timeout (D8).
+    payment-deadline: 3000ms
+  redis:
+    # After a Redis error, skip Redis (MySQL only) for this long instead of paying the 300 ms timeout
+    # on every command; the first command after the window tries Redis again (RedisAvailability, D12).
+    retry-after: 5s
+
+server:
+  port: 8080
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        # /actuator/health/readiness stays OUT_OF_SERVICE until GrpcWarmUp has run (compose healthcheck)
+        enabled: true
+  health:
+    redis:
+      # Redis is an optimisation (idempotency key, read cache), not a dependency: with Redis down the
+      # service keeps serving from MySQL (D12), so it must not report DOWN or fail its healthcheck.
+      enabled: false
+
+logging:
+  level:
+    # The Kafka client logs its whole configuration (dozens of lines) at INFO on every start,
+    # which buries the lines a demo greps for; warnings and errors are kept.
+    org.apache.kafka: WARN
+  structured:
+    format:
+      console: com.sandbox.order.observability.SandboxJsonLogFormatter

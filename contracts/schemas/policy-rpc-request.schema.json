@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sandbox.local/contracts/policy-rpc-request.schema.json",
+  "title": "PolicyRpcRequest",
+  "description": "Body of a message published by order-service to queue 'policy.rpc.request' (Flow 1), sent only after payment replied RECORDED. AMQP reply_to/correlation_id are managed by RabbitTemplate; the business correlation id travels in header 'x-correlation-id'.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["order_id", "payment_id"],
+  "properties": {
+    "order_id": { "type": "string", "minLength": 1 },
+    "payment_id": { "type": "string", "minLength": 1 }
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sandbox.local/contracts/event-envelope.schema.json",
+  "title": "EventEnvelope",
+  "description": "Common envelope of every Kafka event (Flow 2). The Kafka record key is payload.order_id, so all events of one order stay in one partition and in order. The value is JSON; no __TypeId__ header is needed, each consumer knows the type of its topic.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["event_id", "event_type", "correlation_id", "occurred_at", "payload"],
+  "properties": {
+    "event_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Deterministic: a name-based UUID of the business id (payment_id or policy_id). Re-publishing the same fact gives the same event_id, so the consumer's consumer_inbox recognises it."
+    },
+    "event_type": { "type": "string", "enum": ["payment.recorded", "policy.issued"] },
+    "correlation_id": { "type": "string", "minLength": 1, "description": "Business correlation id created by order-service; consumers put it in the MDC." },
+    "occurred_at": { "type": "string", "format": "date-time", "description": "ISO-8601 UTC, e.g. 2026-09-23T09:15:00.123Z" },
+    "payload": { "type": "object" }
+  }
+}

@@ -1,0 +1,63 @@
+# Defaults target a local run against `docker compose` infrastructure (MySQL on host port 3307).
+# Inside Docker, docker-compose.yml overrides them with SPRING_* environment variables.
+spring:
+  application:
+    name: policy-service
+  datasource:
+    url: jdbc:mysql://localhost:3307/policy_db
+    username: policy_svc
+    password: policy_demo_pwd
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate   # Flyway owns the schema (CLAUDE.md 2.3)
+  jackson:
+    property-naming-strategy: SNAKE_CASE   # contracts/schemas use snake_case; the AMQP converter reuses this mapper
+  rabbitmq:
+    host: localhost
+    username: sandbox
+    password: sandbox_demo_pwd
+    listener:
+      simple:
+        # A message that throws goes to the DLQ once instead of being redelivered forever (F8).
+        default-requeue-rejected: false
+  kafka:
+    bootstrap-servers: localhost:9094   # host listener (F25); compose sets kafka:9092
+    producer:
+      # Key and value are Strings (Boot's default serializers): the value is the envelope as JSON,
+      # written with Boot's mapper, so no __TypeId__ header naming a Java class is needed.
+      acks: all                          # the write is on every in-sync replica before send() succeeds
+      properties:
+        enable.idempotence: true         # a producer retry cannot write the record twice
+        max.block.ms: 5000               # Kafka down: send() gives up after 5 s instead of 60 s
+    consumer:
+      group-id: policy-service
+      auto-offset-reset: earliest        # a new group starts at the oldest event, none is skipped
+      enable-auto-commit: false          # no commit on a timer, only after the listener returned
+    listener:
+      # Commit each record's offset after the listener returned, i.e. after its DB transaction
+      # committed: a crash in between redelivers the event, and the inbox skips it (at-least-once).
+      ack-mode: record
+
+server:
+  port: 8082
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        # /actuator/health/readiness stays OUT_OF_SERVICE until RpcWarmUp has run (compose healthcheck)
+        enabled: true
+
+logging:
+  level:
+    # The Kafka client logs its whole configuration (dozens of lines) at INFO on every start,
+    # which buries the lines a demo greps for; warnings and errors are kept.
+    org.apache.kafka: WARN
+  structured:
+    format:
+      console: com.sandbox.policy.observability.SandboxJsonLogFormatter

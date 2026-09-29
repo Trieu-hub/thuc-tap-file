@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sandbox.local/contracts/payment-recorded.schema.json",
+  "title": "PaymentRecordedEvent",
+  "description": "Message on topic 'payment.recorded', published by payment-service after a RecordPayment (gRPC) has been committed, also when the payment was a duplicate. Consumed by policy-service. Key = order_id.",
+  "allOf": [{ "$ref": "event-envelope.schema.json" }],
+  "properties": {
+    "event_type": { "const": "payment.recorded" },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["order_id", "payment_id", "partner_transaction_id", "amount", "recorded_at"],
+      "properties": {
+        "order_id": { "type": "string", "minLength": 1, "examples": ["ORD-20260923-4F7A2C1B"] },
+        "payment_id": { "type": "string", "minLength": 1, "examples": ["PAY-3f0c9d4e-..."] },
+        "partner_transaction_id": { "type": "string", "description": "TXN-{partner_order_id} (D2)", "examples": ["TXN-P-1001"] },
+        "amount": { "type": "integer", "minimum": 1, "description": "VND, integer (D18)", "examples": [500000] },
+        "recorded_at": { "type": "string", "format": "date-time" }
+      }
+    }
+  }
+}

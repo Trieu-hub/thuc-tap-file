@@ -1,0 +1,143 @@
+:root {
+    --bg: #f5f6f8;
+    --card: #ffffff;
+    --text: #1f2933;
+    --muted: #6b7280;
+    --border: #d9dde3;
+    --accent: #1d4ed8;
+    --ok: #15803d;
+    --ok-bg: #dcfce7;
+    --bad: #b91c1c;
+    --bad-bg: #fee2e2;
+    --warn: #92400e;
+    --warn-bg: #fef3c7;
+    --info: #1e40af;
+    --info-bg: #dbeafe;
+}
+
+* { box-sizing: border-box; }
+
+/* The hidden attribute must win over display rules such as .pill { display: inline-block }. */
+[hidden] { display: none !important; }
+
+body {
+    margin: 0;
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+}
+
+header { padding: 20px 24px 4px; }
+header h1 { margin: 0; font-size: 22px; }
+header p { margin: 4px 0 0; color: var(--muted); }
+
+main {
+    display: grid;
+    grid-template-columns: minmax(280px, 380px) 1fr;
+    gap: 16px;
+    padding: 16px 24px 32px;
+}
+
+.card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 20px;
+    min-width: 0;
+}
+.card.wide { grid-column: 1 / -1; }
+.card h2 { margin: 0 0 12px; font-size: 17px; }
+
+label { display: block; margin-bottom: 10px; font-weight: 500; }
+label input:not([type=radio]) {
+    display: block;
+    width: 100%;
+    margin-top: 4px;
+    padding: 7px 9px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font: inherit;
+}
+fieldset { border: 1px solid var(--border); border-radius: 6px; margin: 0 0 12px; }
+label.radio { font-weight: 400; margin: 4px 0; }
+
+.buttons { display: flex; flex-wrap: wrap; gap: 8px; }
+button {
+    font: inherit;
+    border: 1px solid var(--accent);
+    background: var(--accent);
+    color: #fff;
+    padding: 8px 14px;
+    border-radius: 6px;
+    cursor: pointer;
+}
+button.secondary { background: #fff; color: var(--accent); }
+button.link { background: none; border: none; color: var(--accent); padding: 0 4px; font-size: 13px; }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.hint, .muted { color: var(--muted); font-size: 13px; }
+.errors { color: var(--bad); margin: 8px 0 0; padding-left: 18px; }
+
+.row { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.pill {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 999px;
+    background: #eef0f3;
+    font-size: 13px;
+    font-weight: 600;
+}
+.pill.ok { background: var(--ok-bg); color: var(--ok); }
+.pill.bad { background: var(--bad-bg); color: var(--bad); }
+.pill.warn { background: var(--warn-bg); color: var(--warn); }
+.pill.info { background: var(--info-bg); color: var(--info); }
+
+.facts { display: grid; grid-template-columns: 130px 1fr; gap: 6px 12px; margin: 0 0 16px; }
+.facts dt { color: var(--muted); }
+.facts dd { margin: 0; overflow-wrap: anywhere; }
+.status { font-weight: 700; }
+.status.ISSUED { color: var(--ok); }
+.status.PROCESSING_FAILED { color: var(--bad); }
+.status.PAYMENT_RECORDED, .status.CREATED { color: var(--info); }
+
+.timeline { list-style: none; margin: 0 0 16px; padding: 0; }
+.timeline li {
+    position: relative;
+    padding: 8px 0 12px 30px;
+    border-left: 2px solid var(--border);
+    margin-left: 9px;
+}
+.timeline li::before {
+    content: "";
+    position: absolute;
+    left: -9px;
+    top: 10px;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--border);
+}
+.timeline li.done::before { background: var(--ok); }
+.timeline li.failed::before { background: var(--bad); }
+.timeline li.pending { color: var(--muted); }
+.timeline .title { font-weight: 600; }
+.timeline .meta { font-size: 13px; color: var(--muted); }
+
+pre {
+    background: #111827;
+    color: #e5e7eb;
+    padding: 10px;
+    border-radius: 6px;
+    white-space: pre-wrap;
+    word-break: break-all;
+    font-size: 12px;
+}
+
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+tbody tr { cursor: pointer; }
+tbody tr:hover { background: #f0f4ff; }
+
+@media (max-width: 800px) {
+    main { grid-template-columns: 1fr; padding: 12px; }
+}

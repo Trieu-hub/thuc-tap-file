@@ -1,0 +1,40 @@
+// gRPC contract between order-service (client) and payment-service (server).
+// Used only in Flow 2 (GRPC_KAFKA). correlation_id travels in gRPC metadata
+// (key "x-correlation-id"), not in the message body.
+syntax = "proto3";
+
+package sandbox.payment.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option java_multiple_files = true;
+option java_package = "com.sandbox.contracts.payment.v1";
+option java_outer_classname = "PaymentProto";
+
+service PaymentService {
+  // Records a payment for an order. Idempotent on partner_transaction_id:
+  // a repeat returns the existing payment with duplicate = true (CLAUDE.md D4).
+  rpc RecordPayment(RecordPaymentRequest) returns (RecordPaymentResponse);
+}
+
+message RecordPaymentRequest {
+  string order_id = 1;               // e.g. ORD-20260923-001
+  string partner_order_id = 2;
+  string partner_transaction_id = 3; // TXN-{partner_order_id} (D2)
+  int64 amount = 4;                  // VND, integer, > 0 (D18)
+}
+
+enum PaymentStatus {
+  PAYMENT_STATUS_UNSPECIFIED = 0;
+  RECORDED = 1;
+  REJECTED = 2;
+}
+
+message RecordPaymentResponse {
+  string order_id = 1;
+  string payment_id = 2;             // empty when REJECTED
+  PaymentStatus status = 3;
+  string reject_reason = 4;          // set only when REJECTED, e.g. INVALID_AMOUNT
+  bool duplicate = 5;                // true when partner_transaction_id was already recorded
+  google.protobuf.Timestamp recorded_at = 6;
+}
