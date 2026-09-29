@@ -16,11 +16,10 @@ demo all                 # tập dượt: chạy lần lượt bước 0–9 và
 demo all -IncludeOptional  # tập dượt thêm bước 10 (tắt Redis) và 11 (đo tải)
 ```
 
-Mỗi bước in ra 4 loại dòng:
-- `NÓI` (xanh dương): ý cần nói.
+Mỗi bước in ra các loại dòng:
 - `TRÊN UI` (tím): thao tác trên trình duyệt.
 - `PS>` (xám): lệnh đang chạy, để người xem thấy lệnh thật.
-- `MONG ĐỢI` (xanh lá): kết quả đúng. Nếu kết quả khác, xem mục 4.
+- `MONG ĐỢI` (xanh lá): vài gạch đầu dòng gồm kết quả đúng và ý chính để trình bày. Nếu kết quả khác, xem mục 4.
 
 Khi demo thật thì chạy **từng bước** (`demo 3`, `demo 4`, …) để có thể dừng giải thích hoặc quay lại khi được hỏi. Các bước tắt service (7, 10) tự bật lại service trong `finally`, kể cả khi có lỗi giữa chừng.
 

@@ -39,9 +39,12 @@ function Write-Title($n, $text) {
     Write-Host ("BƯỚC {0}: {1}" -f $n, $text) -ForegroundColor Yellow
     Write-Host ('=' * 78) -ForegroundColor DarkGray
 }
-function Say($text) { Write-Host "  NÓI     : $text" -ForegroundColor Cyan }
+function Say($text) { Write-Host "  TRẢ LỜI : $text" -ForegroundColor Cyan }
 function Ui($text) { Write-Host "  TRÊN UI : $text" -ForegroundColor Magenta }
-function Expect($text) { Write-Host "  MONG ĐỢI: $text" -ForegroundColor Green }
+function Expect($lines) {
+    Write-Host '  MONG ĐỢI:' -ForegroundColor Green
+    foreach ($l in @($lines)) { Write-Host "    - $l" -ForegroundColor Green }
+}
 function Cmd($text) { Write-Host "  PS> $text" -ForegroundColor DarkGray }
 function Warn($text) { Write-Host "  LƯU Ý   : $text" -ForegroundColor DarkYellow }
 
@@ -149,7 +152,6 @@ function Test-Readiness {
 
 function Step-0([switch]$Reset, [switch]$Build, [switch]$NoBrowser) {
     Write-Title 0 $script:Steps[0]
-    Say 'Làm trước giờ demo khoảng 30 phút. Máy demo chỉ có khoảng 8 GB RAM: đóng Cursor, bớt tab Chrome.'
     docker info *> $null
     if ($LASTEXITCODE -ne 0) { Warn 'Docker Desktop chưa chạy. Mở Docker Desktop, chờ biểu tượng xanh rồi chạy lại: demo 0'; return }
     if ($Reset) {
@@ -167,7 +169,7 @@ function Step-0([switch]$Reset, [switch]$Build, [switch]$NoBrowser) {
         Start-Process 'http://localhost:3000'
         Start-Process 'http://localhost:15672'
     }
-    Expect 'Mọi service (healthy), ui Up; readiness 3 cổng UP; 2 đơn mồi 200 ISSUED và 202 PAYMENT_RECORDED.'
+    Expect @('Docker Compose: 7 service đều (healthy), ui Up.', 'Readiness 8080, 8081, 8082 đều UP.', '2 đơn mồi: Luồng 1 = 200 ISSUED, Luồng 2 = 202 PAYMENT_RECORDED.')
     if ($NoBrowser) { Warn 'Mở tay: UI http://localhost:3000 và RabbitMQ http://localhost:15672 (user/pass trong .env).' }
     else { Warn 'Trang UI và RabbitMQ (user/pass trong .env) vừa được mở.' }
     Warn 'Nếu UI từng mở trước đó: bấm Ctrl+F5 một lần để trình duyệt tải app.js mới.'
@@ -182,26 +184,19 @@ function Step-1 {
                                         +-- Redis (chống trùng + cache đọc)
                                         +-- MySQL (order_db | payment_db | policy_db, mỗi service một schema)
 '@
-    Say 'Đề: đối tác tạo đơn bảo hiểm, ghi nhận thanh toán, phát hành hợp đồng, thông báo, cập nhật UI.'
-    Say '3 service (Order, Payment, Policy) + 1 UI + RabbitMQ + Kafka + Redis + log JSON có correlation_id.'
-    Say 'Luồng 1 RabbitMQ RPC: HTTP chờ reply của Payment rồi Policy, là ĐỒNG BỘ dù đi qua broker.'
-    Say 'Luồng 2: gRPC tới Payment (cần kết quả ngay), trả 202; phần phát hành chạy BẤT ĐỒNG BỘ qua Kafka.'
-    Say 'Khác đề có chủ đích (docs/design-decisions.md): Java 21 + Spring Boot thay .NET (D9), MySQL (D10), cache xóa khi đổi trạng thái (D1), chặn trùng bằng 409 theo yêu cầu lead (D21).'
+    Expect @('Đề: đối tác tạo đơn, ghi nhận thanh toán, phát hành hợp đồng, thông báo, cập nhật UI.', '3 service (Order, Payment, Policy) + UI + RabbitMQ + Kafka + Redis + log JSON có correlation_id.', 'Luồng 1 RabbitMQ RPC: HTTP chờ reply nên là ĐỒNG BỘ dù đi qua broker.', 'Luồng 2: gRPC tới Payment rồi trả 202; phát hành chạy BẤT ĐỒNG BỘ qua Kafka.', 'Khác đề có chủ đích (docs/design-decisions.md): Java 21 + Spring Boot (D9), MySQL (D10), cache xóa khi đổi trạng thái (D1), chặn trùng 409 theo lead (D21).')
 }
 
 function Step-2 {
     Write-Title 2 $script:Steps[2]
-    Say 'Cả hệ thống chạy bằng 1 lệnh: docker compose up --build. Đã thử từ bản clone sạch: 157 s, mọi service healthy.'
     Cmd 'docker compose ps'; docker compose ps --format 'table {{.Service}}\t{{.Status}}' | Write-Host
     Test-Readiness
-    Say 'Mỗi service chỉ báo readiness UP sau khi tự chạy thử (warm-up): payment và policy chạy thử đường RPC, payment tự gọi gRPC vào chính nó, order kiểm tra kênh gRPC tới payment. Nhờ vậy request đầu không bị chậm.'
-    Expect '7 service (healthy) và ui Up; readiness 8080, 8081, 8082 đều UP.'
+    Expect @('1 lệnh docker compose up dựng cả hệ thống (thử từ bản clone sạch: 157 s).', '7 service (healthy), ui Up.', 'Readiness 8080, 8081, 8082 đều UP: mỗi service tự chạy thử (warm-up) rồi mới báo sẵn sàng, nên request đầu không bị chậm.')
 }
 
 function Step-3 {
     Write-Title 3 $script:Steps[3]
     Ui 'Chọn "Luồng 1: RabbitMQ RPC", bấm [Tạo Đơn & Phát Hành]. Xem timeline 4 bước "via RabbitMQ", Correlation ID, CACHE MISS (DB). Bấm F5: CACHE HIT (REDIS).'
-    Say 'Bản chạy bằng API để thấy số liệu trong terminal:'
     $p = New-PartnerId 'DEMO-L1'
     Cmd "POST $script:Api  mode=RABBITMQ_RPC partner_order_id=$p"
     $r = Send-Order -Partner $p -Mode 'RABBITMQ_RPC'
@@ -210,8 +205,7 @@ function Step-3 {
     $g1 = Get-Order $r.Body.order_id; $g2 = Get-Order $r.Body.order_id
     Write-Host ("  GET lần 1: {0} | GET lần 2: {1} | header X-Correlation-Id={2}" -f $g1.Body.cache_status, $g2.Body.cache_status, $g2.CorrelationHeader)
     $script:Last = @{ OrderId = $r.Body.order_id; CorrelationId = $r.Body.correlation_id; Partner = $p }
-    Expect '200, ISSUED, số hợp đồng ACBI-2026-xxxxxx, 4 bước (Payment và Policy via RabbitMQ); GET 1 = CACHE_MISS_DB, GET 2 = CACHE_HIT_REDIS.'
-    Say 'Thread HTTP đã chờ reply của Payment rồi Policy (reply_to = Direct Reply-to, correlation_id khớp request); timeout mỗi bước 3 s.'
+    Expect @('HTTP 200 + ISSUED + số hợp đồng ACBI-2026-xxxxxx: request phải chờ xong cả Payment và Policy mới trả về (đồng bộ).', 'Timeline 4 bước, Payment và Policy đi via RabbitMQ.', 'GET lần 1 = CACHE_MISS_DB, lần 2 = CACHE_HIT_REDIS.', 'reply_to + correlation_id ghép reply với request; timeout mỗi bước 3 s.')
 }
 
 function Step-4 {
@@ -225,8 +219,7 @@ function Step-4 {
     Write-Host ("  Polling: {0} sau {1} ms, policy_number={2}" -f $f.Order.status, $f.Ms, $f.Order.policy_number)
     Show-Timeline $f.Order
     $script:Last = @{ OrderId = $r.Body.order_id; CorrelationId = $r.Body.correlation_id; Partner = $p }
-    Expect '202 PAYMENT_RECORDED ngay (khoảng 100 ms), rồi ISSUED sau khoảng 0,3–1 s; PAYMENT via gRPC, POLICY_ISSUANCE via Kafka.'
-    Say 'Order không chờ Policy: Payment publish payment.recorded, Policy consume rồi publish policy.issued, Order consume và cập nhật đơn.'
+    Expect @('HTTP 202 PAYMENT_RECORDED ngay (~100 ms): Order chỉ chờ gRPC tới Payment, không chờ Policy.', 'Polling: ISSUED sau khoảng 0,3–1 s.', 'Timeline: PAYMENT via gRPC, POLICY_ISSUANCE via Kafka.', 'Đường đi: payment.recorded -> Policy -> policy.issued -> Order.')
 }
 
 function Step-5 {
@@ -250,9 +243,7 @@ function Step-5 {
     Write-Host ("  6 request giống hệt cùng lúc: {0}" -f ($summary -join ', '))
     Invoke-Sql ("SELECT o.partner_order_id, COUNT(*) AS orders, (SELECT COUNT(*) FROM payment_db.payments p WHERE p.partner_transaction_id = CONCAT('TXN-', o.partner_order_id)) AS payments " +
         "FROM order_db.orders o WHERE o.partner_order_id IN ('$p', '$p2') GROUP BY o.partner_order_id;") | Write-Host
-    Expect '200 ISSUED; 409 DUPLICATE_ORDER kèm order_id gốc; 409 DUPLICATE_ORDER_MISMATCH không kèm order_id; 1 x 200 + 5 x 409 (ORDER_IN_PROGRESS khi đơn gốc chưa ghi xong, DUPLICATE_ORDER nếu đến sau khi đã ghi); mỗi mã chỉ 1 đơn, 1 thanh toán.'
-    Say 'Yêu cầu của lead (D21): request hợp lệ đầu tiên được giữ; trùng y hệt báo lỗi trùng, khác dữ liệu thì chặn luôn. So cả 5 trường.'
-    Say 'Hai lớp chặn: key Redis idempotency:order:{partner_order_id} (SET NX, 24 h) rồi UNIQUE(partner_order_id) trong MySQL (khi Redis chết).'
+    Expect @('Request đầu: 200 ISSUED (request hợp lệ đầu tiên được giữ).', 'Gửi lại y hệt: 409 DUPLICATE_ORDER, có order_id của đơn gốc.', 'Cùng mã, khác số tiền: 409 DUPLICATE_ORDER_MISMATCH, không có order_id.', '6 request cùng lúc: 1 x 200 + 5 x 409 (ORDER_IN_PROGRESS hoặc DUPLICATE_ORDER).', 'SQL: mỗi mã chỉ 1 đơn, 1 thanh toán.', 'Hai lớp chặn: Redis SET NX (24 h), rồi UNIQUE(partner_order_id) trong MySQL.')
 }
 
 function Step-6 {
@@ -268,8 +259,7 @@ function Step-6 {
     Write-Host ("  TTL idempotency:order:{0} = {1} s" -f $script:Last.Partner, (docker compose exec -T redis redis-cli TTL "idempotency:order:$($script:Last.Partner)"))
     $null = Get-Order $script:Last.OrderId
     Write-Host ("  TTL order:{0} = {1} s" -f $script:Last.OrderId, (docker compose exec -T redis redis-cli TTL "order:$($script:Last.OrderId)"))
-    Expect 'Một correlation_id xuất hiện ở cả 3 service, qua HTTP, gRPC (hoặc RabbitMQ) và Kafka; TTL khoảng 86400 s và 600 s.'
-    Say 'correlation_id đi qua header x-correlation-id (RabbitMQ), metadata gRPC và trường correlation_id của envelope Kafka.'
+    Expect @('Cùng 1 correlation_id ở cả order, payment, policy.', 'Đi qua HTTP, gRPC (hoặc header RabbitMQ) và envelope Kafka.', 'TTL key chống trùng ~86400 s, key cache ~600 s.')
 }
 
 function Step-7 {
@@ -291,10 +281,8 @@ function Step-7 {
         Cmd 'docker compose up -d --wait payment-service'; docker compose up -d --wait payment-service 2>&1 | Select-Object -Last 1 | Write-Host
         Send-WarmUp
     }
-    Expect 'Luồng 1: 200 PROCESSING_FAILED / PAYMENT_TIMEOUT sau khoảng 3 s, DLQ tăng đúng 1 (request hết TTL 3 s).'
-    Expect 'Luồng 2: 200 PROCESSING_FAILED, PAYMENT_SERVICE_UNAVAILABLE (nhanh) hoặc PAYMENT_TIMEOUT (khoảng 3 s). Đơn mồi sau khi bật lại: ISSUED.'
-    Say 'HTTP không treo: RabbitTemplate chờ tối đa 3 s rồi trả null, Order ghi PROCESSING_FAILED. Request nằm trong queue quá 3 s bị chuyển vào DLQ thay vì được xử lý muộn.'
-    Say 'Giới hạn đã biết: nếu Payment xử lý xong ngay sau timeout, tiền đã trừ nhưng đơn báo lỗi (cần compensation, xem README).'
+    Expect @('Luồng 1: 200 PROCESSING_FAILED / PAYMENT_TIMEOUT sau ~3 s: HTTP không treo.', 'DLQ tăng đúng 1: request nằm quá TTL 3 s nên bị chuyển sang DLQ.')
+    Expect @('Luồng 2: PROCESSING_FAILED, PAYMENT_SERVICE_UNAVAILABLE (nhanh) hoặc PAYMENT_TIMEOUT (~3 s). Cả hai đều đúng.', 'Bật lại Payment, đơn mồi ISSUED.', 'Giới hạn đã biết: Payment xử lý xong ngay sau timeout thì tiền đã trừ nhưng đơn báo lỗi (cần đối soát).')
     Warn 'Đơn mồi: request đầu tiên sau khi một service khởi động lại có thể mất gần 3 s, nên gửi 1 đơn trước khi demo tiếp.'
 }
 
@@ -315,10 +303,8 @@ function Step-8 {
         ForEach-Object { $o = $_.Line | ConvertFrom-Json; Write-Host ('  log payment-service: {0} {1}' -f $o.log_level, $o.message.Substring(0, [Math]::Min(110, $o.message.Length))) }
     Show-DlqMessages $dlq $auth
     Ui 'Trên RabbitMQ UI (http://localhost:15672) > Queues > payment.rpc.request.dlq > Get messages: đặt Messages = 10 (không phải 1: Get messages trả message CŨ NHẤT trước, tức message hết hạn của bước 7), giữ Ack mode "Nack message requeue true", kéo xuống message CUỐI để thấy payload "{not json".'
-    Expect 'routed = True; DLQ tăng đúng 1; log WARN "Fatal message conversion error; message will be reject"; payment-service vẫn chạy bình thường.'
-    Expect 'DLQ có 2 loại message: reason=expired (request hết TTL 3 s, bước 7) và reason=rejected ("{not json", bước 8).'
-    Say 'Message không đọc được bị từ chối không requeue (default-requeue-rejected: false) nên vào DLQ qua sandbox.dlx, thay vì làm kẹt queue.'
-    Say 'DLQ nhận message theo 2 đường: expired là quá hạn TTL (Payment không kịp lấy ra), rejected là listener từ chối vì không đọc được. Cả hai đều không requeue.'
+    Expect @('routed = True; DLQ tăng đúng 1.', 'Log WARN "Fatal message conversion error; message will be reject"; payment-service vẫn chạy bình thường.', 'Không requeue (default-requeue-rejected: false) nên message hỏng không làm kẹt queue.')
+    Expect @('DLQ có 2 loại: expired = quá TTL 3 s (bước 7); rejected = listener từ chối vì không đọc được ("{not json", bước 8).')
 }
 
 function Step-9 {
@@ -343,8 +329,7 @@ function Step-9 {
     "$key|{not json" | docker compose exec -T kafka /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server localhost:9092 --topic payment.recorded --reader-property parse.key=true --reader-property key.separator="|"
     Start-Sleep -Seconds 3
     Write-Host ("  payment.recorded.DLT: {0} -> {1} message" -f $dltBefore, (Get-TopicSize 'payment.recorded.DLT'))
-    Expect 'duplicate_event_ignored 3 lần ở policy-service và 3 lần ở order-service; policies = 1; timeline vẫn 4 bước; DLT tăng đúng 1.'
-    Say 'Offset chỉ commit sau khi transaction DB xong (at-least-once). Policy chặn trùng bằng consumer_inbox (event_id) và UNIQUE(order_id) trong cùng transaction.'
+    Expect @('Gửi lại cùng event 3 lần: duplicate_event_ignored 3 lần ở policy-service và 3 lần ở order-service.', 'policies = 1, timeline vẫn 4 bước.', 'Vì sao: consumer_inbox (event_id) + UNIQUE(order_id) ghi cùng transaction; offset commit sau khi DB xong.', 'Message hỏng: payment.recorded.DLT tăng đúng 1.')
 }
 
 function Step-10 {
@@ -363,8 +348,7 @@ function Step-10 {
     finally {
         Cmd 'docker compose up -d --wait redis'; docker compose up -d --wait redis 2>&1 | Select-Object -Last 1 | Write-Host
     }
-    Expect '200 ISSUED; 409 DUPLICATE_ORDER (MySQL chặn, idempotency_source=MYSQL); health UP; log redis_circuit_open 1 lần.'
-    Say 'Redis chỉ là lớp tăng tốc (D12): timeout 300 ms, lỗi thì bỏ qua Redis 5 s và dùng MySQL.'
+    Expect @('Redis tắt vẫn tạo đơn: 200 ISSUED.', 'Gửi lại y hệt vẫn 409 DUPLICATE_ORDER (MySQL chặn, idempotency_source=MYSQL).', 'Health UP; log redis_circuit_open 1 lần: bỏ qua Redis 5 s rồi dùng MySQL.')
 }
 
 function Step-11 {
@@ -399,8 +383,7 @@ function Step-11 {
             }
         }
     }
-    Expect '20 đơn: cả 2 luồng đều ISSUED hết. 100 đơn: Luồng 1 chậm rõ (p50 khoảng 2–4,5 s so với khoảng 90 ms khi gửi lẻ), CÓ THỂ có PAYMENT_TIMEOUT tùy máy nặng hay nhẹ (đo ngày 28/9: 51/100, 0/100, 0/100); Luồng 2 trả 202 hết và phát hành đủ 100/100.'
-    Say 'Lý do: mỗi queue RPC có 1 consumer nên request xếp hàng; thread HTTP chờ quá 3 s thì timeout dù Payment vẫn xử lý. Kafka thì giữ event lại và xử lý dần.'
+    Expect @('20 đơn: cả 2 luồng đều ISSUED hết.', '100 đơn Luồng 1: chậm rõ (p50 ~2–4,5 s so với ~90 ms khi gửi lẻ), có thể có PAYMENT_TIMEOUT tùy máy (đo 28/9: 51/100, 0/100, 0/100).', '100 đơn Luồng 2: 202 hết, phát hành đủ 100/100.', 'Vì sao: mỗi queue RPC có 1 consumer nên request xếp hàng, quá 3 s là timeout; Kafka giữ event và xử lý dần.')
 }
 
 function Step-12 {
