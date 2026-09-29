@@ -81,7 +81,9 @@ Khi demo thật thì chạy **từng bước** (`demo 3`, `demo 4`, …) để c
 - **Nói:** HTTP không treo; request quá 3 s trong queue vào DLQ; giới hạn "đã trừ tiền nhưng đơn lỗi" (câu 2).
 
 ### Bước 8: Message hỏng vào DLQ
-- **Mong đợi:** `routed = True`, `payment.rpc.request.dlq` tăng 1, log payment-service WARN "Fatal message conversion error; message will be reject"; xem payload trên RabbitMQ UI > Queues > `payment.rpc.request.dlq` > Get messages.
+- **Mong đợi:** `routed = True`, `payment.rpc.request.dlq` tăng 1, log payment-service WARN "Fatal message conversion error; message will be reject". Script in thêm số message trong DLQ theo `reason`: `expired` (request hết TTL 3 s ở bước 7) và `rejected` (`{not json` ở bước 8).
+- **Xem trên RabbitMQ UI:** Queues > `payment.rpc.request.dlq` > Get messages. Đặt **Messages = 10**, không phải 1: Get messages trả message **cũ nhất** trước, tức message của bước 7. Giữ Ack mode "Nack message requeue true" để message không bị lấy khỏi hàng, rồi kéo xuống message **cuối** để thấy `{not json`. Đừng bấm Purge: sẽ mất bằng chứng của bước 7.
+- **Nói:** DLQ nhận message theo hai đường: `expired` là quá hạn TTL (Payment không kịp lấy ra), `rejected` là listener từ chối vì không đọc được. Cả hai đều không requeue nên không làm kẹt queue.
 
 ### Bước 9: Kafka gửi lại và DLT
 - **Mong đợi:** `duplicate_event_ignored` 3 lần ở policy-service và 3 lần ở order-service; `policies = 1`; timeline 4 bước; `payment.recorded.DLT` tăng 1.

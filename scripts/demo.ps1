@@ -92,6 +92,31 @@ function Get-QueueDepth($queue) {
     return [int](($line -split '\s+')[1])
 }
 
+function Show-DlqMessages($queue, $auth) {
+    # Management API "get" with ackmode ack_requeue_true only peeks: every message stays in the queue.
+    # The oldest message comes first, so the newest ones are at the end of the list.
+    $count = [Math]::Min([Math]::Max((Get-QueueDepth $queue), 1), 500)
+    $body = '{"count":' + $count + ',"ackmode":"ack_requeue_true","encoding":"auto","truncate":200}'
+    # Assign first, then pipe: piping Invoke-RestMethod directly can hand the whole JSON array on as ONE object.
+    $response = Invoke-RestMethod -Method Post -Uri "http://localhost:15672/api/queues/%2F/$queue/get" -Headers $auth -ContentType 'application/json' -Body $body
+    $msgs = @($response | Where-Object { $_ })
+    $rows = @(foreach ($m in $msgs) {
+        $death = $null
+        if ($m.properties.headers) { $death = $m.properties.headers.'x-death' }
+        $reason = '?'
+        if ($death) { $reason = @($death)[0].reason }
+        [pscustomobject]@{ Reason = $reason; Payload = [string]$m.payload }
+    })
+    Write-Host ("  {0}: {1} message" -f $queue, $rows.Count)
+    foreach ($g in ($rows | Group-Object Reason)) { Write-Host ("    reason={0}: {1}" -f $g.Name, $g.Count) }
+    Write-Host '  3 message mới nhất (cũ hơn ở trên):'
+    foreach ($r in ($rows | Select-Object -Last 3)) {
+        $t = $r.Payload
+        if ($t.Length -gt 90) { $t = $t.Substring(0, 90) + '...' }
+        Write-Host ("    {0,-9} | {1}" -f $r.Reason, $t)
+    }
+}
+
 function Get-TopicSize($topic) {
     $total = 0
     docker compose exec -T kafka /opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server localhost:9092 --topic $topic 2>$null |
@@ -288,9 +313,12 @@ function Step-8 {
     Write-Host ("  {0} sau: {1}" -f $dlq, (Get-QueueDepth $dlq))
     docker compose logs --no-log-prefix --since 1m payment-service | Select-String 'Fatal message conversion error' | Select-Object -Last 1 |
         ForEach-Object { $o = $_.Line | ConvertFrom-Json; Write-Host ('  log payment-service: {0} {1}' -f $o.log_level, $o.message.Substring(0, [Math]::Min(110, $o.message.Length))) }
-    Ui 'Trên RabbitMQ UI (http://localhost:15672) > Queues > payment.rpc.request.dlq > Get messages: thấy payload "{not json".'
+    Show-DlqMessages $dlq $auth
+    Ui 'Trên RabbitMQ UI (http://localhost:15672) > Queues > payment.rpc.request.dlq > Get messages: đặt Messages = 10 (không phải 1: Get messages trả message CŨ NHẤT trước, tức message hết hạn của bước 7), giữ Ack mode "Nack message requeue true", kéo xuống message CUỐI để thấy payload "{not json".'
     Expect 'routed = True; DLQ tăng đúng 1; log WARN "Fatal message conversion error; message will be reject"; payment-service vẫn chạy bình thường.'
+    Expect 'DLQ có 2 loại message: reason=expired (request hết TTL 3 s, bước 7) và reason=rejected ("{not json", bước 8).'
     Say 'Message không đọc được bị từ chối không requeue (default-requeue-rejected: false) nên vào DLQ qua sandbox.dlx, thay vì làm kẹt queue.'
+    Say 'DLQ nhận message theo 2 đường: expired là quá hạn TTL (Payment không kịp lấy ra), rejected là listener từ chối vì không đọc được. Cả hai đều không requeue.'
 }
 
 function Step-9 {
