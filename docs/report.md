@@ -1,6 +1,6 @@
 # Báo cáo bài tập: Insurance Sandbox (RabbitMQ RPC, gRPC + Kafka)
 
-Thực tập sinh: <họ tên>. Thời gian: 5 ngày (2026-09-23 đến 2026-09-28). Demo nghiệm thu: dự kiến <ngày>. Đề: `intern-messaging-grpc-kafka-assignment.md`.
+Thực tập sinh: Nguyễn Quốc Triệu. Thời gian: 5 ngày (2026-09-23 đến 2026-09-28). Demo nghiệm thu: dự kiến 29/9/2026. Đề: `intern-messaging-grpc-kafka-assignment.md`.
 
 ## 1. Mục tiêu và phạm vi
 
@@ -22,14 +22,14 @@ Web UI (nginx :3000) ──/api──► Order :8080 ──┬── Luồng 1: 
                                    └── MySQL (order_db | payment_db | policy_db, mỗi service một schema)
 ```
 
-| | Luồng 1: RabbitMQ RPC | Luồng 2: gRPC + Kafka |
-|---|---|---|
-| Kiểu | Đồng bộ: thread HTTP chờ Payment rồi Policy | Đồng bộ tới Payment, sau đó bất đồng bộ qua event |
-| Trả lời HTTP | `200 ISSUED` (hoặc `PROCESSING_FAILED`) | `202 PAYMENT_RECORDED`, UI polling tới `ISSUED` |
-| Timeout | reply-timeout 3 s, queue TTL 3 s rồi vào DLQ | deadline gRPC 3 s cho mỗi lần gọi |
-| Chống trùng phía nhận | `UNIQUE(partner_transaction_id)`, `UNIQUE(order_id)` | Như Luồng 1, cộng `consumer_inbox` (event_id) |
-| Message lỗi | `<queue>.dlq` | `<topic>.DLT` sau 3 lần thử lại |
-| `correlation_id` | header `x-correlation-id` | metadata gRPC, trường `correlation_id` của envelope |
+|                       | Luồng 1: RabbitMQ RPC                                | Luồng 2: gRPC + Kafka                               |
+| --------------------- | ---------------------------------------------------- | --------------------------------------------------- |
+| Kiểu                  | Đồng bộ: thread HTTP chờ Payment rồi Policy          | Đồng bộ tới Payment, sau đó bất đồng bộ qua event   |
+| Trả lời HTTP          | `200 ISSUED` (hoặc `PROCESSING_FAILED`)              | `202 PAYMENT_RECORDED`, UI polling tới `ISSUED`     |
+| Timeout               | reply-timeout 3 s, queue TTL 3 s rồi vào DLQ         | deadline gRPC 3 s cho mỗi lần gọi                   |
+| Chống trùng phía nhận | `UNIQUE(partner_transaction_id)`, `UNIQUE(order_id)` | Như Luồng 1, cộng `consumer_inbox` (event_id)       |
+| Message lỗi           | `<queue>.dlq`                                        | `<topic>.DLT` sau 3 lần thử lại                     |
+| `correlation_id`      | header `x-correlation-id`                            | metadata gRPC, trường `correlation_id` của envelope |
 
 Sơ đồ sequence đầy đủ (kể cả nhánh lỗi) ở `docs/sequence-diagrams.md`; hợp đồng ở `contracts/` (`payment.proto`, 7 JSON Schema).
 
@@ -38,6 +38,7 @@ Sơ đồ sequence đầy đủ (kể cả nhánh lỗi) ở `docs/sequence-diag
 **Test tự động:** 103 test (order 62, payment 21, policy 20), 0 lỗi, chạy bằng `scripts\run-tests.ps1`. Test tích hợp dùng MySQL, RabbitMQ, Kafka và Redis thật qua Testcontainers.
 
 **Kiểm chứng ngoài test:**
+
 - Clone sạch từ GitHub rồi chạy `docker compose up --build`: 157 s, mọi service healthy.
 - 11 message thật (event Kafka, request và reply RPC) khớp JSON Schema trong `contracts/` (kiểm bằng `ajv`).
 - 100% dòng log của 3 service là JSON.
@@ -45,49 +46,49 @@ Sơ đồ sequence đầy đủ (kể cả nhánh lỗi) ở `docs/sequence-diag
 
 **Đối chiếu với đề:** đã tách đề thành 51 yêu cầu và kiểm từng yêu cầu bằng test, chạy thật trên sandbox và đọc code (ngày 27–28/9). Tóm tắt theo mục:
 
-| Mục đề | Nội dung | Kết quả |
-|---|---|---|
-| I–II | 3 service, UI, RabbitMQ, Kafka, Redis, log JSON; trách nhiệm từng service | Đạt |
-| III.1 | `reply_to`, `correlation_id`, timeout 3 s, `PROCESSING_FAILED`, HTTP không treo | Đạt |
-| III.2 | `.proto`, envelope 5 trường, idempotent consumer, `duplicate_event_ignored` | Đạt |
-| IV | Form, radio 2 luồng, timeline 4 bước, Correlation ID, `CACHE MISS` rồi `HIT`, nút gửi trùng | Đạt |
-| V | Key chống trùng 24 h, cache 10 phút đọc Redis trước; log JSON đủ field | Đạt |
-| VI | Ngày 1–5: hạ tầng, 2 luồng, UI, Redis, log, kịch bản ngoại lệ, README 1 lệnh | Đạt; buổi demo nghiệm thu dự kiến <ngày> |
-| VIII | compose 1 lệnh, README (API, ảnh UI, sơ đồ), `contracts/` | Đạt |
+| Mục đề | Nội dung                                                                                    | Kết quả                                  |
+| ------ | ------------------------------------------------------------------------------------------- | ---------------------------------------- |
+| I–II   | 3 service, UI, RabbitMQ, Kafka, Redis, log JSON; trách nhiệm từng service                   | Đạt                                      |
+| III.1  | `reply_to`, `correlation_id`, timeout 3 s, `PROCESSING_FAILED`, HTTP không treo             | Đạt                                      |
+| III.2  | `.proto`, envelope 5 trường, idempotent consumer, `duplicate_event_ignored`                 | Đạt                                      |
+| IV     | Form, radio 2 luồng, timeline 4 bước, Correlation ID, `CACHE MISS` rồi `HIT`, nút gửi trùng | Đạt                                      |
+| V      | Key chống trùng 24 h, cache 10 phút đọc Redis trước; log JSON đủ field                      | Đạt                                      |
+| VI     | Ngày 1–5: hạ tầng, 2 luồng, UI, Redis, log, kịch bản ngoại lệ, README 1 lệnh                | Đạt; buổi demo nghiệm thu dự kiến <ngày> |
+| VIII   | compose 1 lệnh, README (API, ảnh UI, sơ đồ), `contracts/`                                   | Đạt                                      |
 
 **Số đo** (máy Windows 8 GB RAM, Docker Desktop, 2026-09-27/28):
 
-| Đo | Luồng 1 | Luồng 2 |
-|---|---|---|
-| 1 đơn (sau warm-up) | 81–305 ms, `200 ISSUED` | 68–127 ms cho `202`; `ISSUED` sau khoảng 0,35 s |
-| Payment tắt | `PAYMENT_TIMEOUT` sau khoảng 3,1 s, request vào DLQ | `UNAVAILABLE` sau 70–925 ms hoặc `TIMEOUT` sau khoảng 3,2 s |
-| 20 đơn cùng lúc (4 lần) | 20/20 `ISSUED`, p50 439–619 ms | 20/20 `202`, `ISSUED` hết sau khoảng 1 s |
-| 100 đơn cùng lúc (3 lần) | Lần 1: 49 `ISSUED`, **51 `PAYMENT_TIMEOUT`** (p50 4,5 s). Lần 2 và 3: 100/100 `ISSUED`, p50 2,9 s và 2,0 s | 100/100 `202` cả 3 lần; `ISSUED` hết sau 3–13 s |
-| Redis tắt | Vẫn tạo đơn (121–454 ms), vẫn chặn trùng qua MySQL | Như Luồng 1 |
+| Đo                       | Luồng 1                                                                                                    | Luồng 2                                                     |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| 1 đơn (sau warm-up)      | 81–305 ms, `200 ISSUED`                                                                                    | 68–127 ms cho `202`; `ISSUED` sau khoảng 0,35 s             |
+| Payment tắt              | `PAYMENT_TIMEOUT` sau khoảng 3,1 s, request vào DLQ                                                        | `UNAVAILABLE` sau 70–925 ms hoặc `TIMEOUT` sau khoảng 3,2 s |
+| 20 đơn cùng lúc (4 lần)  | 20/20 `ISSUED`, p50 439–619 ms                                                                             | 20/20 `202`, `ISSUED` hết sau khoảng 1 s                    |
+| 100 đơn cùng lúc (3 lần) | Lần 1: 49 `ISSUED`, **51 `PAYMENT_TIMEOUT`** (p50 4,5 s). Lần 2 và 3: 100/100 `ISSUED`, p50 2,9 s và 2,0 s | 100/100 `202` cả 3 lần; `ISSUED` hết sau 3–13 s             |
+| Redis tắt                | Vẫn tạo đơn (121–454 ms), vẫn chặn trùng qua MySQL                                                         | Như Luồng 1                                                 |
 
 ## 4. Các điểm khác đề (có chủ đích)
 
 Tất cả đều ghi trong `docs/design-decisions.md`, kèm lý do:
 
-| Mã | Khác đề | Lý do |
-|---|---|---|
-| D9 | Java 21 + Spring Boot thay .NET 10 | Lead đồng ý; luồng, hợp đồng và demo không phụ thuộc ngôn ngữ |
-| D10 | MySQL 8 thay Postgres/SQLite | Đề chỉ nêu ví dụ; 1 container, 3 schema, mỗi service 1 user |
-| D1 | Cache chỉ ghi khi GET, **xóa** khi đơn đổi trạng thái (đề: ghi cache khi phát hành) | Nếu ghi khi phát hành thì lần xem đầu đã là HIT, không thể hiện `CACHE MISS (DB)` như đề IV.3 |
-| D3 | File `payment.proto` (đề ghi cả `PaymentService.proto`) | Theo quy ước đặt tên Protobuf; tên service giữ `PaymentService` |
-| D5 | Thông báo là bước mô phỏng trong Order | Đề loại SMS thật; không thêm service thứ 4 |
-| D4, D20 | gRPC lỗi thì trả `200 PROCESSING_FAILED` | Request đã xử lý xong, chỉ là kết quả thất bại; giống Luồng 1 |
+| Mã      | Khác đề                                                                               | Lý do                                                                                                                                                                                                                              |
+| ------- | ------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| D9      | Java 21 + Spring Boot thay .NET 10                                                    | Lead đồng ý; luồng, hợp đồng và demo không phụ thuộc ngôn ngữ                                                                                                                                                                      |
+| D10     | MySQL 8 thay Postgres/SQLite                                                          | Đề chỉ nêu ví dụ; 1 container, 3 schema, mỗi service 1 user                                                                                                                                                                        |
+| D1      | Cache chỉ ghi khi GET, **xóa** khi đơn đổi trạng thái (đề: ghi cache khi phát hành)   | Nếu ghi khi phát hành thì lần xem đầu đã là HIT, không thể hiện `CACHE MISS (DB)` như đề IV.3                                                                                                                                      |
+| D3      | File `payment.proto` (đề ghi cả `PaymentService.proto`)                               | Theo quy ước đặt tên Protobuf; tên service giữ `PaymentService`                                                                                                                                                                    |
+| D5      | Thông báo là bước mô phỏng trong Order                                                | Đề loại SMS thật; không thêm service thứ 4                                                                                                                                                                                         |
+| D4, D20 | gRPC lỗi thì trả `200 PROCESSING_FAILED`                                              | Request đã xử lý xong, chỉ là kết quả thất bại; giống Luồng 1                                                                                                                                                                      |
 | **D21** | **Request trùng `partner_order_id` bị chặn bằng `409`** (đề V.1: "trả về kết quả cũ") | **Yêu cầu của lead ngày 2026-09-28:** request hợp lệ đầu tiên được giữ; trùng y hệt trả `409 DUPLICATE_ORDER` (vẫn kèm `order_id` và trạng thái đơn gốc, UI hiển thị đơn gốc); khác dữ liệu thì trả `409 DUPLICATE_ORDER_MISMATCH` |
 
 ## 5. Giới hạn đã biết và hướng production
 
-| Giới hạn | Bằng chứng | Hướng xử lý trong production |
-|---|---|---|
-| RPC timeout nhưng Payment vẫn xử lý: **đã trừ tiền, đơn báo lỗi** | Lần đo 100 đơn có timeout: 51/51 đơn `PAYMENT_TIMEOUT` đều có payment, 51 dòng `late_reply_ignored` | Compensation / reconciliation (Saga): job đối soát hoàn tiền hoặc hoàn tất đơn |
-| Luồng 1 chịu tải kém: 1 consumer mỗi queue RPC, request xếp hàng | 100 đơn cùng lúc: p50 từ khoảng 90 ms lên 2–4,5 s; 1 trong 3 lần đo có 51% timeout (tùy máy nặng hay nhẹ) | Tăng `concurrency`, scale instance, từ chối sớm (503); luồng chịu tải thì dùng bất đồng bộ như Luồng 2 |
-| Dual write ở Payment (commit DB rồi mới publish Kafka) | README: Kafka tắt thì event mất, đơn kẹt `PAYMENT_RECORDED` | Transactional Outbox |
-| Deadline 3 s chỉ bao lời gọi gRPC; ghi DB trước và sau không có giới hạn | Máy thiếu RAM: MySQL COMMIT có lần mất 9,3 s | Đủ RAM; timeout truy vấn; metrics để phát hiện |
-| Quan sát chỉ bằng log | Truy vết phải grep `correlation_id` | Metrics (Prometheus), tracing (OpenTelemetry), gom log (Loki) |
+| Giới hạn                                                                 | Bằng chứng                                                                                                | Hướng xử lý trong production                                                                           |
+| ------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| RPC timeout nhưng Payment vẫn xử lý: **đã trừ tiền, đơn báo lỗi**        | Lần đo 100 đơn có timeout: 51/51 đơn `PAYMENT_TIMEOUT` đều có payment, 51 dòng `late_reply_ignored`       | Compensation / reconciliation (Saga): job đối soát hoàn tiền hoặc hoàn tất đơn                         |
+| Luồng 1 chịu tải kém: 1 consumer mỗi queue RPC, request xếp hàng         | 100 đơn cùng lúc: p50 từ khoảng 90 ms lên 2–4,5 s; 1 trong 3 lần đo có 51% timeout (tùy máy nặng hay nhẹ) | Tăng `concurrency`, scale instance, từ chối sớm (503); luồng chịu tải thì dùng bất đồng bộ như Luồng 2 |
+| Dual write ở Payment (commit DB rồi mới publish Kafka)                   | README: Kafka tắt thì event mất, đơn kẹt `PAYMENT_RECORDED`                                               | Transactional Outbox                                                                                   |
+| Deadline 3 s chỉ bao lời gọi gRPC; ghi DB trước và sau không có giới hạn | Máy thiếu RAM: MySQL COMMIT có lần mất 9,3 s                                                              | Đủ RAM; timeout truy vấn; metrics để phát hiện                                                         |
+| Quan sát chỉ bằng log                                                    | Truy vết phải grep `correlation_id`                                                                       | Metrics (Prometheus), tracing (OpenTelemetry), gom log (Loki)                                          |
 
 ## 6. Trả lời 5 câu hỏi nghiệm thu
 
